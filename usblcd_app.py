@@ -76,7 +76,7 @@ class LCDApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} — AIO LCD player")
-        self.geometry("640x560")
+        self.geometry("640x760")
         self.resizable(False, False)
         self.configure(bg="#f0f0f0")
 
@@ -145,6 +145,19 @@ class LCDApp(tk.Tk):
         ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var).grid(
             row=row, column=1, sticky="w", pady=4)
 
+        # Preview
+        preview_frame = ttk.LabelFrame(self, text=" Preview ")
+        preview_frame.pack(fill="x", **pad)
+        self.preview_canvas = tk.Canvas(preview_frame, width=320, height=144,
+                                        bg="#1a1a1a", highlightthickness=1,
+                                        highlightbackground="#ccc")
+        self.preview_canvas.pack(padx=8, pady=8)
+        self._preview_photo = None
+        self._preview_frames: list[tk.PhotoImage] = []
+        self._preview_idx = 0
+        self._preview_job: str | None = None
+        self._draw_preview_placeholder("No preview")
+
         # Status
         status_frame = ttk.Frame(self)
         status_frame.pack(fill="x", **pad)
@@ -196,6 +209,105 @@ class LCDApp(tk.Tk):
         name = path.split("/")[-1].split("\\")[-1]
         self.file_label.config(text=name, foreground="#1a1a1a")
         self._set_status(f"Loaded: {name} (click Play)", "#1a6fb0")
+        self._load_preview(path)
+
+    # ---------- Preview ----------
+
+    def _draw_preview_placeholder(self, text: str):
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_text(
+            160, 72, text=text, fill="#666", font=("Segoe UI", 10)
+        )
+
+    def _load_preview(self, path: str):
+        """Show the first frame; animate GIFs in the preview canvas."""
+        if self._preview_job:
+            self.after_cancel(self._preview_job)
+            self._preview_job = None
+        self._preview_frames = []
+        self._preview_idx = 0
+
+        low = path.lower()
+        try:
+            if low.endswith(".gif"):
+                self._load_gif_preview(path)
+            elif low.endswith(".zt"):
+                self._load_zt_preview(path)
+            else:
+                self._load_static_preview(path)
+        except Exception as e:
+            self._draw_preview_placeholder(f"Preview failed: {e}")
+
+    def _photo_from_image(self, img: Image.Image) -> tk.PhotoImage:
+        """Scale an image to the preview canvas and convert to PhotoImage."""
+        img = img.convert("RGB")
+        cw, ch = 320, 144
+        iw, ih = img.size
+        scale = min(cw / iw, ch / ih)
+        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        img = img.resize((nw, nh), Image.BILINEAR)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return tk.PhotoImage(data=buf.getvalue())
+
+    def _show_preview_frame(self, photo: tk.PhotoImage):
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(160, 72, image=photo)
+        self._preview_photo = photo  # keep reference
+
+    def _load_static_preview(self, path: str):
+        img = Image.open(path)
+        self._show_preview_frame(self._photo_from_image(img))
+
+    def _load_gif_preview(self, path: str):
+        src = Image.open(path)
+        n = 0
+        for frame in ImageSequence.Iterator(src):
+            self._preview_frames.append(self._photo_from_image(frame))
+            n += 1
+            if n >= 30:  # cap preview frames for memory
+                break
+        if not self._preview_frames:
+            self._draw_preview_placeholder("No frames")
+            return
+        self._show_preview_frame(self._preview_frames[0])
+        if len(self._preview_frames) > 1:
+            self._animate_preview()
+
+    def _load_zt_preview(self, path: str):
+        with open(path, "rb") as f:
+            data = f.read()
+        frames = []
+        pos = 0
+        while len(frames) < 30:
+            idx = data.find(b"\xFF\xD8", pos)
+            if idx < 0:
+                break
+            eoi = data.find(b"\xFF\xD9", idx)
+            if eoi < 0:
+                break
+            frames.append(Image.open(io.BytesIO(data[idx : eoi + 2])))
+            pos = eoi + 2
+        if not frames:
+            self._draw_preview_placeholder("No frames")
+            return
+        self._preview_frames = [self._photo_from_image(f) for f in frames]
+        self._show_preview_frame(self._preview_frames[0])
+        if len(self._preview_frames) > 1:
+            self._animate_preview()
+
+    def _animate_preview(self):
+        if len(self._preview_frames) < 2:
+            return
+        self._preview_idx = (self._preview_idx + 1) % len(self._preview_frames)
+        self._show_preview_frame(self._preview_frames[self._preview_idx])
+        self._preview_job = self.after(80, self._animate_preview)
+
+    def _stop_preview(self):
+        if self._preview_job:
+            self.after_cancel(self._preview_job)
+            self._preview_job = None
+        self._preview_frames = []
 
     def _parse_settings(self):
         res = self.res_var.get().replace(" ", "").split("x")
@@ -358,6 +470,7 @@ class LCDApp(tk.Tk):
         self.status_label.config(text=text, fg=color)
 
     def _on_close(self):
+        self._stop_preview()
         self._stop_play()
         if self.lcd is not None:
             try:
