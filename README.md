@@ -11,6 +11,7 @@ Verified end-to-end on a **Thermalright Rainbow** AIO (panel is a Somore "USBDIS
 - Orientation control ✅ (panel mounts upside-down in some AIOs — use `--rotate 180`)
 - Brightness ✅ (0-100, software overlay — same method TRCC uses)
 - Theme save/load ✅ (settings persisted: rotation, scale, brightness, fps)
+- Live monitor overlay ✅ (GPU temp/freq + CPU freq drawn on the animation, 4 corner positions, rotates with the frame)
 
 ## Performance: ~190× lighter than TRCC
 
@@ -26,6 +27,25 @@ Measured live on the same hardware, same ff7 theme, same display (2026-08-10):
 **≈193× less CPU** for the identical animation. TRCC burns ~40% of a core
 permanently (HWiNFO sensor polling + continuous re-render + 4-process
 overhead); this tool pre-encodes frames once and only does USB writes.
+
+### Monitor overlay CPU (live sensors on top of the animation)
+
+The GUI can overlay live **GPU temp / GPU freq / CPU freq** (see Monitor
+overlay checkbox). That adds re-encode work — measured on real GIFs
+(2026-08-10):
+
+| Scenario | CPU | vs TRCC |
+|---|---|---|
+| GIF playback only (44-frame theme @ 24fps) | **0.002 cores (0.2%)** | ~193× less |
+| GIF + overlay (224-frame GIF @ 33fps) | **0.156 cores (15.6%)** | ~2.6× less |
+| GIF + overlay (100-frame GIF @ 17fps) | **0.171 cores (17.1%)** | ~2.4× less |
+| TRCC full stack | 0.405 cores (40.5%) | — |
+
+Overlay cost scales with **update rate × frame count** (each sensor-text
+change re-encodes the animation cycle once — JPEG can't be partially
+re-encoded). The overlay updates at most every 2s and only when the
+visible text actually changes (CPU 2 decimals), so cost stays bounded
+while readings feel live.
 
 ### Gotchas discovered (hardware-verified)
 1. **Every frame MUST be wrapped in the 64-byte PICTURE header** — raw JPEG gets silently ignored (display shows boot logo)
