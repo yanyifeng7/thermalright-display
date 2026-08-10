@@ -151,12 +151,15 @@ class LCDApp(tk.Tk):
         self.bright_var = tk.IntVar(value=100)
         bright_frame = ttk.Frame(settings)
         bright_frame.grid(row=row, column=3, sticky="w", pady=4)
-        self.bright_scale = ttk.Scale(bright_frame, from_=0, to=100,
-                                      variable=self.bright_var, length=90,
-                                      command=self._on_brightness)
-        self.bright_scale.pack(side="left")
+        # Click-to-set bar: one click = one brightness change
+        self.bright_canvas = tk.Canvas(bright_frame, width=110, height=22,
+                                       bg="#e8e8e8", highlightthickness=1,
+                                       highlightbackground="#aaa", cursor="hand2")
+        self.bright_canvas.pack(side="left")
+        self.bright_canvas.bind("<Button-1>", self._brightness_click)
         self.bright_label = ttk.Label(bright_frame, text="100", width=4)
         self.bright_label.pack(side="left", padx=4)
+        self._draw_brightness_bar()
 
         row += 1
         ttk.Label(settings, text="Loop:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
@@ -400,14 +403,45 @@ class LCDApp(tk.Tk):
         return width, height, rotate, quality, fps, scale, brightness
 
     def _on_brightness(self, *args):
-        """Update brightness label + live preview while sliding."""
+        """Update brightness label + live preview when the value changes."""
         val = int(self.bright_var.get())
         self.bright_label.config(text=str(val))
+        self._draw_brightness_bar()
         if self.file_path:
             self._refresh_preview()
         # Live-adjust the playing frames: re-encode with new brightness
         if self.player is not None and self.frames:
             self._reencode_playing(val)
+
+    def _brightness_click(self, event):
+        """Single click on the bar sets brightness once (0-100)."""
+        w = self.bright_canvas.winfo_width()
+        if w <= 0:
+            w = 110
+        frac = max(0.0, min(1.0, event.x / w))
+        val = int(round(frac * 100))
+        # Only act if the value actually changed (avoid redundant re-encodes)
+        if val != int(self.bright_var.get()):
+            self.bright_var.set(val)  # triggers _on_brightness once
+
+    def _draw_brightness_bar(self):
+        """Paint the brightness bar with a fill + tick marks."""
+        c = self.bright_canvas
+        c.delete("all")
+        w = 110
+        h = 22
+        val = int(self.bright_var.get())
+        fill_w = max(2, int(w * val / 100))
+        # Fill portion
+        c.create_rectangle(1, 1, fill_w, h - 1, fill="#4a90d9", outline="")
+        # Tick marks at 0/25/50/75/100
+        for frac in (0, 0.25, 0.5, 0.75, 1.0):
+            x = int(w * frac)
+            c.create_line(x, 1, x, h - 1, fill="#555", width=1)
+        # Label of current value drawn on the bar
+        c.create_text(max(16, fill_w - 14), h // 2, text=str(val),
+                      fill="#fff" if val > 30 else "#333",
+                      font=("Segoe UI", 8, "bold"))
 
     def _reencode_playing(self, brightness: int):
         """Re-encode the current clip's frames with a new brightness.
