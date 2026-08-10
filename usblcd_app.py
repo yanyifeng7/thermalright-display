@@ -40,7 +40,7 @@ FPS_CHOICES = ["5", "10", "15", "20", "24", "30", "60"]
 SCALE_MODES = ["Fit (letterbox)", "Fill (crop)", "Stretch (fill screen)"]
 OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"]
 # Minimum seconds between overlay re-renders (bounds re-encode CPU cost)
-OVERLAY_MIN_UPDATE_S = 5.0
+OVERLAY_MIN_UPDATE_S = 2.0
 
 
 class PlayerThread(threading.Thread):
@@ -171,9 +171,9 @@ class MonitorThread(threading.Thread):
         while not self._stop.is_set():
             r = sensor.read()
             # Displayed text decides staleness (what the user SEES):
-            # CPU 1 decimal, GPU MHz rounded to 50, GPU temp rounded.
+            # CPU 2 decimals, GPU MHz rounded to 50, GPU temp rounded.
             text = (
-                f"{r.cpu_freq_mhz/1000:.1f}" if r.cpu_freq_mhz else "-",
+                f"{r.cpu_freq_mhz/1000:.2f}" if r.cpu_freq_mhz else "-",
                 f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
                 f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
             )
