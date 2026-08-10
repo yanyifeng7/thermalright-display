@@ -39,13 +39,23 @@ QUALITY_LEVELS = ["High (95)", "Good (85)", "Medium (75)", "Low (60)"]
 FPS_CHOICES = ["5", "10", "15", "20", "24", "30", "60"]
 SCALE_MODES = ["Fit (letterbox)", "Fill (crop)", "Stretch (fill screen)"]
 OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"]
+# Minimum seconds between overlay re-renders (bounds re-encode CPU cost)
+OVERLAY_MIN_UPDATE_S = 5.0
 
 
 class PlayerThread(threading.Thread):
-    """Background thread that streams frames to the LCD."""
+    """Background thread that streams frames to the LCD.
+
+    With monitor overlay active, frames are re-encoded LAZILY: each frame
+    is decoded + overlay + re-encoded only when it's about to be sent and
+    its cached overlay is stale (sensor values changed). This avoids
+    re-encoding ALL frames on every sensor tick (the naive approach burned
+    ~0.4 cores on a 224-frame GIF — see bench_overlay3.py).
+    """
 
     def __init__(self, lcd: USBLCD, frames: list[bytes], delays_ms: list[int],
-                 width: int, height: int, on_error, on_loop):
+                 width: int, height: int, on_error, on_loop,
+                 overlay_provider=None):
         super().__init__(daemon=True)
         self.lcd = lcd
         self.frames = frames
@@ -54,6 +64,7 @@ class PlayerThread(threading.Thread):
         self.height = height
         self.on_error = on_error
         self.on_loop = on_loop
+        self.overlay_provider = overlay_provider  # None = no overlay
         self._stop = threading.Event()
 
     def stop(self):
@@ -64,9 +75,12 @@ class PlayerThread(threading.Thread):
         loop = 0
         while not self._stop.is_set():
             loop += 1
-            for frame, delay in zip(self.frames, self.delays_ms):
+            for i, (frame, delay) in enumerate(zip(self.frames, self.delays_ms)):
                 if self._stop.is_set():
                     return
+                # Lazy overlay: re-encode this frame only if stale
+                if self.overlay_provider is not None:
+                    frame = self.overlay_provider.get_frame(i, frame)
                 t0 = time.monotonic()
                 try:
                     self.lcd.send_frame(jpeg_to_frame(frame, self.width, self.height))
@@ -80,20 +94,23 @@ class PlayerThread(threading.Thread):
 
 
 class MonitorThread(threading.Thread):
-    """Polls sensors at 1 Hz; re-encodes playing frames with the overlay
-    when a quantized value changes (render-on-change, capped ~2 Hz)."""
+    """Polls sensors at 1 Hz; updates the overlay sprite + marks frames
+    stale. Actual per-frame re-encode happens lazily in the player."""
 
     def __init__(self, app, frames: list[bytes], delays_ms: list[int],
                  width: int, height: int, on_status):
         super().__init__(daemon=True)
         self.app = app
-        self.frames = frames          # shared list (mutated in place)
+        self.frames = frames          # shared list (base frames)
         self.delays_ms = delays_ms
         self.width = width
         self.height = height
         self.on_status = on_status
         self._stop = threading.Event()
-        self._last_key: tuple | None = None
+        self._lock = threading.Lock()
+        # Overlay state: readings + a cache of overlaid frames (by index)
+        self._readings = None
+        self._cache: dict[int, bytes] = {}
         self._sensor = None
 
     def stop(self):
@@ -106,54 +123,76 @@ class MonitorThread(threading.Thread):
             self._sensor = SensorMonitor()
         return self._sensor
 
-    def run(self):
+    def invalidate(self):
+        """Drop the overlay cache (brightness/settings changed)."""
+        with self._lock:
+            self._cache.clear()
+
+    def get_frame(self, i: int, base_frame: bytes) -> bytes:
+        """Return the overlaid frame for index i, re-encoding lazily if
+        the cached copy is stale (readings changed)."""
         from usblcd.frames import draw_monitor_overlay, apply_brightness
         from PIL import Image
         import io as _io
 
-        sensor = self._sensor_monitor()
-        quality = int(self.app.qual_var.get().split("(")[1].rstrip(")"))
-        rotate = int(self.app.rot_var.get().replace("°", ""))
-        position = self.app.overlay_pos_var.get()
-        # Re-read current brightness each loop so overlay re-encodes respect it
-        while not self._stop.is_set():
+        with self._lock:
+            cached = self._cache.get(i)
+            if cached is not None:
+                return cached
+            readings = self._readings
             brightness = int(self.app.bright_var.get())
-            source = list(self.app._source_frames)  # TRUE pre-brightness
+            rotate = int(self.app.rot_var.get().replace("°", ""))
+            position = self.app.overlay_pos_var.get()
+            quality = int(self.app.qual_var.get().split("(")[1].rstrip(")"))
+        if readings is None:
+            return base_frame
+        # Re-encode this one frame with overlay + current brightness
+        img = Image.open(_io.BytesIO(base_frame)).convert("RGB")
+        img = apply_brightness(img, brightness)
+        img = draw_monitor_overlay(
+            img,
+            gpu_temp_c=readings.gpu_temp_c,
+            gpu_freq_mhz=readings.gpu_freq_mhz,
+            cpu_freq_mhz=readings.cpu_freq_mhz,
+            rotate=rotate,
+            position=position,
+        )
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        out = buf.getvalue()
+        with self._lock:
+            self._cache[i] = out
+        return out
+
+    def run(self):
+        sensor = self._sensor_monitor()
+        last_text = None
+        last_update = 0.0
+        while not self._stop.is_set():
             r = sensor.read()
-            # Quantize so tiny freq jitter doesn't trigger re-encodes
-            key = (
-                round(r.cpu_freq_mhz / 100) if r.cpu_freq_mhz else None,
-                round(r.gpu_freq_mhz / 50) if r.gpu_freq_mhz else None,
-                round(r.gpu_temp_c) if r.gpu_temp_c else None,
+            # Displayed text decides staleness (what the user SEES):
+            # CPU 1 decimal, GPU MHz rounded to 50, GPU temp rounded.
+            text = (
+                f"{r.cpu_freq_mhz/1000:.1f}" if r.cpu_freq_mhz else "-",
+                f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
+                f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
             )
-            if key != self._last_key:
-                self._last_key = key
-                try:
-                    new_frames = []
-                    for f in source:
-                        img = Image.open(_io.BytesIO(f)).convert("RGB")
-                        img = apply_brightness(img, brightness)
-                        img = draw_monitor_overlay(
-                            img,
-                            gpu_temp_c=r.gpu_temp_c,
-                            gpu_freq_mhz=r.gpu_freq_mhz,
-                            cpu_freq_mhz=r.cpu_freq_mhz,
-                            rotate=rotate,
-                            position=position,
-                        )
-                        buf = _io.BytesIO()
-                        img.save(buf, format="JPEG", quality=quality)
-                        new_frames.append(buf.getvalue())
-                    # In-place so the running player picks it up
-                    self.frames[:] = new_frames
-                    if self.on_status:
-                        self.on_status(
-                            f"Monitor: CPU {r.cpu_freq_mhz/1000:.2f} GHz"
-                            f" | GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c}C"
-                        )
-                except Exception:
-                    pass
-            self._stop.wait(1.0)
+            now = time.monotonic()
+            # Re-render only when the visible text changed AND at least
+            # OVERLAY_MIN_UPDATE_S since the last render (bounds the
+            # per-frame re-encode cost on long/fast GIFs).
+            if text != last_text and (now - last_update) >= OVERLAY_MIN_UPDATE_S:
+                last_text = text
+                last_update = now
+                with self._lock:
+                    self._readings = r
+                    self._cache.clear()  # all frames stale -> lazy re-encode
+                if self.on_status:
+                    self.on_status(
+                        f"Monitor: CPU {r.cpu_freq_mhz/1000:.2f} GHz"
+                        f" | GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c}C"
+                    )
+            self._stop.wait(0.5)
 
         if self._sensor is not None:
             try:
@@ -604,6 +643,9 @@ class LCDApp(tk.Tk):
                 new_frames.append(buf.getvalue())
             # Mutate the shared list in place so the running player picks it up
             self.frames[:] = new_frames
+            # Overlay cache is now stale (brightness baked into new frames)
+            if self.monitor is not None:
+                self.monitor.invalidate()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -800,12 +842,8 @@ class LCDApp(tk.Tk):
         n = len(self.frames)
         width, height, _, _, _, _, _ = self._parse_settings()
         total = sum(len(f) for f in self.frames)
-        self.player = PlayerThread(
-            self.lcd, self.frames, self.delays_ms, width, height,
-            on_error=self._on_player_error, on_loop=self._on_loop,
-        )
-        self.player.start()
-        # Monitor overlay: poll sensors + re-encode on change
+        # Monitor overlay: the monitor provides the lazy overlay cache;
+        # the player re-encodes each frame on demand as it cycles.
         self.monitor = None
         if self.monitor_var.get():
             self.monitor = MonitorThread(
@@ -813,6 +851,12 @@ class LCDApp(tk.Tk):
                 on_status=self._set_status,
             )
             self.monitor.start()
+        self.player = PlayerThread(
+            self.lcd, self.frames, self.delays_ms, width, height,
+            on_error=self._on_player_error, on_loop=self._on_loop,
+            overlay_provider=self.monitor,
+        )
+        self.player.start()
         self.play_btn.config(text="Pause")
         self.stop_btn.config(state="normal")
         self._set_status(f"Playing: {n} frames, ~{total // n} KB/frame", "#1a8a3a")
