@@ -107,7 +107,7 @@ class MonitorThread(threading.Thread):
         return self._sensor
 
     def run(self):
-        from usblcd.frames import draw_monitor_overlay
+        from usblcd.frames import draw_monitor_overlay, apply_brightness
         from PIL import Image
         import io as _io
 
@@ -115,9 +115,10 @@ class MonitorThread(threading.Thread):
         quality = int(self.app.qual_var.get().split("(")[1].rstrip(")"))
         rotate = int(self.app.rot_var.get().replace("°", ""))
         position = self.app.overlay_pos_var.get()
-        source = list(self.app._source_frames)  # pre-brightness frames
-
+        # Re-read current brightness each loop so overlay re-encodes respect it
         while not self._stop.is_set():
+            brightness = int(self.app.bright_var.get())
+            source = list(self.app._source_frames)  # TRUE pre-brightness
             r = sensor.read()
             # Quantize so tiny freq jitter doesn't trigger re-encodes
             key = (
@@ -131,6 +132,7 @@ class MonitorThread(threading.Thread):
                     new_frames = []
                     for f in source:
                         img = Image.open(_io.BytesIO(f)).convert("RGB")
+                        img = apply_brightness(img, brightness)
                         img = draw_monitor_overlay(
                             img,
                             gpu_temp_c=r.gpu_temp_c,
@@ -583,7 +585,7 @@ class LCDApp(tk.Tk):
     def _reencode_playing(self, brightness: int):
         """Re-encode the current clip's frames with a new brightness.
 
-        Re-encodes from the cached pre-brightness frames (avoiding
+        Re-encodes from the TRUE pre-brightness frames (avoiding
         double-compression), mutating the shared list in place so the
         running player picks it up. Runs in a background thread.
         """
@@ -615,6 +617,7 @@ class LCDApp(tk.Tk):
         low = path.lower()
 
         frames, delays = [], []
+        own_zt = False
         if low.endswith(".zt"):
             with open(path, "rb") as f:
                 data = f.read()
@@ -624,6 +627,7 @@ class LCDApp(tk.Tk):
             if meta is not None:
                 # Our own theme: frames are FINAL (settings baked into pixels).
                 # Use them directly; restore any settings not already set.
+                own_zt = True
                 self.fps_var.set(str(meta["fps"]))
                 self.rot_var.set(f"{meta['rotate']}°")
                 self.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
@@ -634,7 +638,8 @@ class LCDApp(tk.Tk):
                 frames = zt_to_frames(data)
                 delays = [int(1000 / meta["fps"])] * len(frames)
             else:
-                # TRCC-style .zt: raw JPEGs need re-encoding + current settings
+                # TRCC-style .zt: raw JPEGs need re-encoding + current settings.
+                # Encode at brightness=100 (pre-brightness source).
                 pos = 0
                 while True:
                     idx = data.find(b"\xFF\xD8", pos)
@@ -644,7 +649,7 @@ class LCDApp(tk.Tk):
                     if eoi < 0:
                         break
                     img = Image.open(io.BytesIO(data[idx : eoi + 2])).convert("RGB")
-                    frames.append(self._encode(img, target, rotate, quality, scale, brightness))
+                    frames.append(self._encode(img, target, rotate, quality, scale, 100))
                     delays.append(int(1000 / fps))
                     pos = eoi + 2
         elif low.endswith(".gif"):
@@ -655,7 +660,8 @@ class LCDApp(tk.Tk):
                 if rotate:
                     canvas = canvas.rotate(-rotate, expand=True)
                     canvas = self._scale(canvas, target, scale)
-                frames.append(self._encode(canvas, target, 0, quality, scale, brightness))
+                # brightness=100: _source_frames stay pre-brightness
+                frames.append(self._encode(canvas, target, 0, quality, scale, 100))
                 d = frame.info.get("duration", 0)
                 delays.append(max(10, int(d)) if d else 100)
         else:  # static image
@@ -664,15 +670,37 @@ class LCDApp(tk.Tk):
             if rotate:
                 img = img.rotate(-rotate, expand=True)
                 img = self._scale(img, target, scale)
-            frames.append(self._encode(img, target, 0, quality, scale, brightness))
+            frames.append(self._encode(img, target, 0, quality, scale, 100))
             delays.append(1000)
 
         if not frames:
             return False
-        self.frames, self.delays_ms = frames, delays
-        self._source_frames = list(frames)  # pre-brightness copies for live re-encode
+        # _source_frames = TRUE pre-brightness (encoded at 100). The playing
+        # frames derive from it by applying the current brightness, so the
+        # monitor overlay re-encode always respects the brightness setting.
+        self._source_frames = list(frames)
+        if own_zt:
+            # Final frames already have their settings baked in
+            self.frames = list(frames)
+        else:
+            self.frames = [self._apply_brightness_bytes(f, brightness, quality)
+                           for f in frames]
+        self.delays_ms = delays
         self.save_btn.config(state="normal")
         return True
+
+    @staticmethod
+    def _apply_brightness_bytes(jpeg: bytes, brightness: int, quality: int) -> bytes:
+        """Re-encode a JPEG byte frame with a brightness (0-100)."""
+        from usblcd.frames import apply_brightness
+
+        if brightness >= 100:
+            return jpeg
+        img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        img = apply_brightness(img, brightness)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
 
     @staticmethod
     def _scale(img, target, mode: str = "fit"):
