@@ -39,8 +39,10 @@ QUALITY_LEVELS = ["High (95)", "Good (85)", "Medium (75)", "Low (60)"]
 FPS_CHOICES = ["5", "10", "15", "20", "24", "30", "60"]
 SCALE_MODES = ["Fit (letterbox)", "Fill (crop)", "Stretch (fill screen)"]
 OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"]
-# Minimum seconds between overlay re-renders (bounds re-encode CPU cost)
-OVERLAY_MIN_UPDATE_S = 2.0
+# Minimum seconds between overlay re-renders (bounds re-encode CPU cost).
+# Lazy per-frame re-encode makes the marginal cost of faster updates tiny
+# (measured: 1s cap = 0.194 cores vs 2s = 0.171 on a 100-frame GIF).
+OVERLAY_MIN_UPDATE_S = 1.0
 
 
 class PlayerThread(threading.Thread):
