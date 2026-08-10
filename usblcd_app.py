@@ -151,8 +151,9 @@ class LCDApp(tk.Tk):
         self.bright_var = tk.IntVar(value=100)
         bright_frame = ttk.Frame(settings)
         bright_frame.grid(row=row, column=3, sticky="w", pady=4)
-        # Click-to-set bar: one click = one brightness change
-        self.bright_canvas = tk.Canvas(bright_frame, width=110, height=22,
+        # Click-to-set bar: one click = one brightness change.
+        # Snap zones: clicking just outside the left/right end sets 0/100.
+        self.bright_canvas = tk.Canvas(bright_frame, width=134, height=22,
                                        bg="#e8e8e8", highlightthickness=1,
                                        highlightbackground="#aaa", cursor="hand2")
         self.bright_canvas.pack(side="left")
@@ -414,32 +415,46 @@ class LCDApp(tk.Tk):
             self._reencode_playing(val)
 
     def _brightness_click(self, event):
-        """Single click on the bar sets brightness once (0-100)."""
+        """Single click on the bar sets brightness once (0-100).
+
+        Snap zones: clicks in the left/right 12px margins set 0/100.
+        """
         w = self.bright_canvas.winfo_width()
         if w <= 0:
-            w = 110
-        frac = max(0.0, min(1.0, event.x / w))
-        val = int(round(frac * 100))
+            w = 134
+        edge = 12  # snap zone width at each end
+        if event.x <= edge:
+            val = 0
+        elif event.x >= w - edge:
+            val = 100
+        else:
+            frac = (event.x - edge) / (w - 2 * edge)
+            val = int(round(max(0.0, min(1.0, frac)) * 100))
         # Only act if the value actually changed (avoid redundant re-encodes)
         if val != int(self.bright_var.get()):
             self.bright_var.set(val)  # triggers _on_brightness once
 
     def _draw_brightness_bar(self):
-        """Paint the brightness bar with a fill + tick marks."""
+        """Paint the brightness bar inset with snap-zone margins + ticks."""
         c = self.bright_canvas
         c.delete("all")
-        w = 110
+        w = 134
         h = 22
+        edge = 12
+        bar_w = w - 2 * edge  # 110px visible bar
         val = int(self.bright_var.get())
-        fill_w = max(2, int(w * val / 100))
+        fill_w = max(2, int(bar_w * val / 100))
+        # Visible bar background (darker, distinct from snap zones)
+        c.create_rectangle(edge, 1, w - edge, h - 1, fill="#d0d0d0", outline="")
         # Fill portion
-        c.create_rectangle(1, 1, fill_w, h - 1, fill="#4a90d9", outline="")
+        c.create_rectangle(edge, 1, edge + fill_w, h - 1, fill="#4a90d9", outline="")
         # Tick marks at 0/25/50/75/100
         for frac in (0, 0.25, 0.5, 0.75, 1.0):
-            x = int(w * frac)
+            x = int(edge + bar_w * frac)
             c.create_line(x, 1, x, h - 1, fill="#555", width=1)
-        # Label of current value drawn on the bar
-        c.create_text(max(16, fill_w - 14), h // 2, text=str(val),
+        # Current value label
+        text_x = max(edge + 4, edge + fill_w - 14)
+        c.create_text(text_x, h // 2, text=str(val),
                       fill="#fff" if val > 30 else "#333",
                       font=("Segoe UI", 8, "bold"))
 
