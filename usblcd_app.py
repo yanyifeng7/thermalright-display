@@ -32,6 +32,7 @@ RESOLUTIONS = [
 ROTATIONS = ["0°", "90°", "180°", "270°"]
 QUALITY_LEVELS = ["High (95)", "Good (85)", "Medium (75)", "Low (60)"]
 FPS_CHOICES = ["5", "10", "15", "20", "24", "30", "60"]
+SCALE_MODES = ["Fit (letterbox)", "Fill (crop)", "Stretch (fill screen)"]
 
 
 class PlayerThread(threading.Thread):
@@ -140,10 +141,15 @@ class LCDApp(tk.Tk):
                      state="readonly", width=6).grid(row=row, column=3, sticky="w", pady=4)
 
         row += 1
-        ttk.Label(settings, text="Loop:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Scale:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        self.scale_var = tk.StringVar(value=SCALE_MODES[0])
+        ttk.Combobox(settings, textvariable=self.scale_var, values=SCALE_MODES,
+                     state="readonly", width=18).grid(row=row, column=1, sticky="w", pady=4)
+
+        ttk.Label(settings, text="Loop:").grid(row=row, column=2, sticky="w", padx=10, pady=4)
         self.loop_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var).grid(
-            row=row, column=1, sticky="w", pady=4)
+            row=row, column=3, sticky="w", pady=4)
 
         # Preview
         preview_frame = ttk.LabelFrame(self, text=" Preview ")
@@ -332,13 +338,14 @@ class LCDApp(tk.Tk):
         rotate = int(self.rot_var.get().replace("°", ""))
         quality = int(self.qual_var.get().split("(")[1].rstrip(")"))
         fps = int(self.fps_var.get())
-        return width, height, rotate, quality, fps
+        scale = self.scale_var.get().split(" ")[0].lower()
+        return width, height, rotate, quality, fps, scale
 
     def _load_clip(self):
         """Load + pre-encode frames from the selected file."""
         if not self.file_path:
             return False
-        width, height, rotate, quality, fps = self._parse_settings()
+        width, height, rotate, quality, fps, scale = self._parse_settings()
         target = (width, height)
         path = self.file_path
         low = path.lower()
@@ -356,27 +363,27 @@ class LCDApp(tk.Tk):
                 if eoi < 0:
                     break
                 img = Image.open(io.BytesIO(data[idx : eoi + 2])).convert("RGB")
-                frames.append(self._encode(img, target, rotate, quality))
+                frames.append(self._encode(img, target, rotate, quality, scale))
                 delays.append(int(1000 / fps))
                 pos = eoi + 2
         elif low.endswith(".gif"):
             src = Image.open(path)
             for frame in ImageSequence.Iterator(src):
                 rgb = frame.convert("RGB")
-                canvas = self._fit(rgb, target)
+                canvas = self._scale(rgb, target, scale)
                 if rotate:
                     canvas = canvas.rotate(-rotate, expand=True)
-                    canvas = self._fit(canvas, target)
-                frames.append(self._encode(canvas, target, 0, quality))
+                    canvas = self._scale(canvas, target, scale)
+                frames.append(self._encode(canvas, target, 0, quality, scale))
                 d = frame.info.get("duration", 0)
                 delays.append(max(10, int(d)) if d else 100)
         else:  # static image
             img = Image.open(path).convert("RGB")
-            img = self._fit(img, target)
+            img = self._scale(img, target, scale)
             if rotate:
                 img = img.rotate(-rotate, expand=True)
-                img = self._fit(img, target)
-            frames.append(self._encode(img, target, 0, quality))
+                img = self._scale(img, target, scale)
+            frames.append(self._encode(img, target, 0, quality, scale))
             delays.append(1000)
 
         if not frames:
@@ -385,9 +392,30 @@ class LCDApp(tk.Tk):
         return True
 
     @staticmethod
-    def _fit(img, target):
+    def _scale(img, target, mode: str = "fit"):
+        """Scale image to the target panel.
+
+        mode:
+          fit     - letterbox (preserve aspect, black bars)
+          fill    - crop to cover (preserve aspect, fill screen)
+          stretch - distort to exactly fill the panel
+        """
         tw, th = target
         iw, ih = img.size
+
+        if mode == "stretch":
+            return img.resize(target, Image.LANCZOS)
+
+        if mode == "fill":
+            scale = max(tw / iw, th / ih)
+            nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            img = img.resize((nw, nh), Image.LANCZOS)
+            # center-crop to target
+            x = (nw - tw) // 2
+            y = (nh - th) // 2
+            return img.crop((x, y, x + tw, y + th))
+
+        # fit (default): letterbox on black
         scale = min(tw / iw, th / ih)
         nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
         img = img.resize((nw, nh), Image.LANCZOS)
@@ -396,11 +424,11 @@ class LCDApp(tk.Tk):
         return canvas
 
     @staticmethod
-    def _encode(img, target, rotate, quality):
+    def _encode(img, target, rotate, quality, scale="fit"):
         img = img.convert("RGB")
         if rotate:
             img = img.rotate(-rotate, expand=True)
-            img = LCDApp._fit(img, target)
+            img = LCDApp._scale(img, target, scale)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
         return buf.getvalue()
@@ -456,7 +484,7 @@ class LCDApp(tk.Tk):
             return
 
         n = len(self.frames)
-        width, height, _, _, _ = self._parse_settings()
+        width, height, _, _, _, _ = self._parse_settings()
         total = sum(len(f) for f in self.frames)
         self.player = PlayerThread(
             self.lcd, self.frames, self.delays_ms, width, height,
