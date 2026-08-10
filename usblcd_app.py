@@ -525,18 +525,35 @@ class LCDApp(tk.Tk):
         if low.endswith(".zt"):
             with open(path, "rb") as f:
                 data = f.read()
-            pos = 0
-            while True:
-                idx = data.find(b"\xFF\xD8", pos)
-                if idx < 0:
-                    break
-                eoi = data.find(b"\xFF\xD9", idx)
-                if eoi < 0:
-                    break
-                img = Image.open(io.BytesIO(data[idx : eoi + 2])).convert("RGB")
-                frames.append(self._encode(img, target, rotate, quality, scale, brightness))
-                delays.append(int(1000 / fps))
-                pos = eoi + 2
+            from usblcd.ztfile import zt_parse, zt_to_frames
+
+            meta = zt_parse(data)
+            if meta is not None:
+                # Our own theme: frames are FINAL (settings baked into pixels).
+                # Use them directly; restore any settings not already set.
+                self.fps_var.set(str(meta["fps"]))
+                self.rot_var.set(f"{meta['rotate']}°")
+                self.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
+                self.bright_var.set(meta["brightness"])
+                res = f"{meta['width']} x {meta['height']}"
+                if res in RESOLUTIONS:
+                    self.res_var.set(res)
+                frames = zt_to_frames(data)
+                delays = [int(1000 / meta["fps"])] * len(frames)
+            else:
+                # TRCC-style .zt: raw JPEGs need re-encoding + current settings
+                pos = 0
+                while True:
+                    idx = data.find(b"\xFF\xD8", pos)
+                    if idx < 0:
+                        break
+                    eoi = data.find(b"\xFF\xD9", idx)
+                    if eoi < 0:
+                        break
+                    img = Image.open(io.BytesIO(data[idx : eoi + 2])).convert("RGB")
+                    frames.append(self._encode(img, target, rotate, quality, scale, brightness))
+                    delays.append(int(1000 / fps))
+                    pos = eoi + 2
         elif low.endswith(".gif"):
             src = Image.open(path)
             for frame in ImageSequence.Iterator(src):
@@ -708,7 +725,17 @@ class LCDApp(tk.Tk):
         try:
             from usblcd.ztfile import frames_to_zt
 
-            data = frames_to_zt(self.frames, name=name, fps=fps)
+            width, height, rotate, _, _, scale, brightness = self._parse_settings()
+            data = frames_to_zt(
+                self.frames,
+                name=name,
+                fps=fps,
+                width=width,
+                height=height,
+                rotate=rotate,
+                scale=scale,
+                brightness=brightness,
+            )
             with open(dest, "wb") as f:
                 f.write(data)
         except Exception as e:
@@ -743,7 +770,7 @@ class LCDApp(tk.Tk):
         return name
 
     def _load_theme(self):
-        """Load a saved theme from themes/ and play it."""
+        """Load a saved theme from themes/ and play it (settings restored)."""
         name = self._selected_theme()
         if not name:
             return
@@ -751,25 +778,26 @@ class LCDApp(tk.Tk):
         self.file_path = path
         self.file_label.config(text=name, foreground="#1a1a1a")
 
-        # Parse the .zt header for its stored fps, if present
+        # Parse the .zt header for stored settings, if present
+        meta = None
         try:
-            from usblcd.ztfile import ZT_MAGIC
+            from usblcd.ztfile import zt_parse
 
             with open(path, "rb") as f:
-                head = f.read(len(ZT_MAGIC) + 4)
-            if head[: len(ZT_MAGIC)] == ZT_MAGIC:
-                import struct
-
-                pos = len(ZT_MAGIC)
-                (name_len,) = struct.unpack_from("<I", head, pos)
-                pos += 4
-                with open(path, "rb") as f:
-                    f.seek(pos + name_len)
-                    (fps,) = struct.unpack("<I", f.read(4))
-                if 1 <= fps <= 60:
-                    self.fps_var.set(str(fps))
+                data = f.read()
+            meta = zt_parse(data)
         except Exception:
             pass
+
+        if meta is not None:
+            # Restore GUI controls to the saved theme's settings
+            self.fps_var.set(str(meta["fps"]))
+            self.rot_var.set(f"{meta['rotate']}°")
+            self.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
+            self.bright_var.set(meta["brightness"])
+            res = f"{meta['width']} x {meta['height']}"
+            if res in RESOLUTIONS:
+                self.res_var.set(res)
 
         self._load_preview(path)
         self._set_status(f"Loaded theme: {name} (click Play)", "#1a6fb0")
