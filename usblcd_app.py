@@ -82,7 +82,7 @@ class LCDApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} — AIO LCD player")
-        self.geometry("640x760")
+        self.geometry("640x880")
         self.resizable(False, False)
         self.configure(bg="#f0f0f0")
 
@@ -196,6 +196,27 @@ class LCDApp(tk.Tk):
         self._preview_total = 1
         self._preview_delay = 80
         self._draw_preview_placeholder("No preview")
+
+        # My Themes panel
+        themes_frame = ttk.LabelFrame(self, text=" My Themes ")
+        themes_frame.pack(fill="x", **pad)
+        themes_row = ttk.Frame(themes_frame)
+        themes_row.pack(fill="x", padx=8, pady=(6, 0))
+        ttk.Label(themes_row, text="Saved in themes/:").pack(side="left")
+        ttk.Button(themes_row, text="Refresh", command=self._refresh_themes,
+                   width=9).pack(side="right")
+        ttk.Button(themes_row, text="Delete", command=self._delete_theme,
+                   width=9).pack(side="right", padx=4)
+        ttk.Button(themes_row, text="Load", command=self._load_theme,
+                   width=9).pack(side="right", padx=4)
+        self.themes_list = tk.Listbox(themes_frame, height=4,
+                                      selectmode=tk.SINGLE,
+                                      font=("Segoe UI", 9))
+        self.themes_list.pack(fill="x", padx=8, pady=6)
+        self.themes_list.bind("<Double-Button-1>", lambda e: self._load_theme())
+        self._themes_dir = os.path.join(_PROJECT_ROOT_DIR, "themes")
+        os.makedirs(self._themes_dir, exist_ok=True)
+        self._refresh_themes()
 
         # Status
         status_frame = ttk.Frame(self)
@@ -695,6 +716,80 @@ class LCDApp(tk.Tk):
             return
 
         self._set_status(f"Saved: {name}.zt ({len(self.frames)} frames)", "#1a8a3a")
+        self._refresh_themes()
+
+    def _refresh_themes(self):
+        """List .zt files in the themes/ dir."""
+        self.themes_list.delete(0, tk.END)
+        try:
+            entries = sorted(
+                f for f in os.listdir(self._themes_dir) if f.lower().endswith(".zt")
+            )
+        except OSError:
+            entries = []
+        for e in entries:
+            self.themes_list.insert(tk.END, e)
+        if not entries:
+            self.themes_list.insert(tk.END, "(no themes saved yet)")
+
+    def _selected_theme(self) -> str | None:
+        sel = self.themes_list.curselection()
+        if not sel:
+            self._set_status("Select a theme first", "#c0392b")
+            return None
+        name = self.themes_list.get(sel[0])
+        if name.startswith("("):
+            return None
+        return name
+
+    def _load_theme(self):
+        """Load a saved theme from themes/ and play it."""
+        name = self._selected_theme()
+        if not name:
+            return
+        path = os.path.join(self._themes_dir, name)
+        self.file_path = path
+        self.file_label.config(text=name, foreground="#1a1a1a")
+
+        # Parse the .zt header for its stored fps, if present
+        try:
+            from usblcd.ztfile import ZT_MAGIC
+
+            with open(path, "rb") as f:
+                head = f.read(len(ZT_MAGIC) + 4)
+            if head[: len(ZT_MAGIC)] == ZT_MAGIC:
+                import struct
+
+                pos = len(ZT_MAGIC)
+                (name_len,) = struct.unpack_from("<I", head, pos)
+                pos += 4
+                with open(path, "rb") as f:
+                    f.seek(pos + name_len)
+                    (fps,) = struct.unpack("<I", f.read(4))
+                if 1 <= fps <= 60:
+                    self.fps_var.set(str(fps))
+        except Exception:
+            pass
+
+        self._load_preview(path)
+        self._set_status(f"Loaded theme: {name} (click Play)", "#1a6fb0")
+        # Auto-play if connected
+        if self.lcd is not None and self.player is None:
+            self._toggle_play()
+
+    def _delete_theme(self):
+        """Delete the selected theme file."""
+        name = self._selected_theme()
+        if not name:
+            return
+        if not messagebox.askyesno("Delete theme", f"Delete '{name}'?", parent=self):
+            return
+        try:
+            os.remove(os.path.join(self._themes_dir, name))
+            self._set_status(f"Deleted: {name}", "#888")
+        except OSError as e:
+            self._set_status(f"Delete failed: {e}", "#c0392b")
+        self._refresh_themes()
 
     def _on_player_error(self, msg):
         self.after(0, lambda: (self._stop_play(),
