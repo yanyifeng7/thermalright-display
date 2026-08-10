@@ -151,6 +151,10 @@ class LCDApp(tk.Tk):
         ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var).grid(
             row=row, column=3, sticky="w", pady=4)
 
+        # Live preview: refresh when display-affecting settings change
+        for var in (self.res_var, self.rot_var, self.scale_var):
+            var.trace_add("write", lambda *a: self._refresh_preview())
+
         # Preview
         preview_frame = ttk.LabelFrame(self, text=" Preview ")
         preview_frame.pack(fill="x", **pad)
@@ -223,6 +227,23 @@ class LCDApp(tk.Tk):
 
     # ---------- Preview ----------
 
+    def _refresh_preview(self):
+        """Reload preview when Resolution/Rotation/Scale changes."""
+        if self.file_path:
+            self._load_preview(self.file_path)
+        else:
+            self._draw_preview_placeholder("No preview")
+
+    def _panel_transform(self, img: Image.Image) -> Image.Image:
+        """Apply the current panel settings (scale mode, rotation, res)."""
+        width, height, rotate, _, _, scale = self._parse_settings()
+        target = (width, height)
+        img = self._scale(img, target, scale)
+        if rotate:
+            img = img.rotate(-rotate, expand=True)
+            img = self._scale(img, target, scale)
+        return img
+
     def _draw_preview_placeholder(self, text: str):
         self.preview_canvas.delete("all")
         self.preview_canvas.create_text(
@@ -270,13 +291,15 @@ class LCDApp(tk.Tk):
 
     def _load_static_preview(self, path: str):
         img = Image.open(path)
+        img = self._panel_transform(img)
         self._show_preview_frame(self._photo_from_image(img))
 
     def _load_gif_preview(self, path: str):
         src = Image.open(path)
         self._preview_src = src
         self._preview_total = getattr(src, "n_frames", 1) or 1
-        self._show_preview_frame(self._photo_from_image(src))
+        frame = self._panel_transform(src.copy())
+        self._show_preview_frame(self._photo_from_image(frame))
         if self._preview_total > 1:
             self._animate_preview()
 
@@ -302,6 +325,7 @@ class LCDApp(tk.Tk):
         self._preview_zt_data = data
         self._preview_total = len(slices)
         first = Image.open(io.BytesIO(data[slices[0][0] : slices[0][1]]))
+        first = self._panel_transform(first)
         self._show_preview_frame(self._photo_from_image(first))
         if len(slices) > 1:
             self._animate_preview()
@@ -315,10 +339,12 @@ class LCDApp(tk.Tk):
             if self._preview_src is not None:
                 self._preview_src.seek(self._preview_idx)
                 frame = self._preview_src.copy()
+                frame = self._panel_transform(frame)
                 self._show_preview_frame(self._photo_from_image(frame))
             elif self._preview_slices:
                 s, e = self._preview_slices[self._preview_idx]
                 frame = Image.open(io.BytesIO(self._preview_zt_data[s:e]))
+                frame = self._panel_transform(frame)
                 self._show_preview_frame(self._photo_from_image(frame))
         except Exception:
             pass  # skip bad frame, keep animating
