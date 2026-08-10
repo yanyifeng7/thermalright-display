@@ -183,7 +183,7 @@ def main() -> int:
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
                     help="Rotate frames (panels mount upside-down in some AIOs)")
     ap.add_argument("--quality", type=int, default=95, help="JPEG quality")
-    ap.add_argument("--fps", type=int, default=24, help="Playback fps for .zt files")
+    ap.add_argument("--fps", type=int, default=24, help="Playback fps for .zt files (5-60)")
     ap.add_argument("--repeat", type=int, default=-1, help="Loop count (-1 = infinite)")
     args = ap.parse_args()
 
