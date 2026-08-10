@@ -171,6 +171,7 @@ class LCDApp(tk.Tk):
         self._preview_zt_data: bytes | None = None
         self._preview_static = None
         self._preview_total = 1
+        self._preview_delay = 80
         self._draw_preview_placeholder("No preview")
 
         # Status
@@ -317,9 +318,15 @@ class LCDApp(tk.Tk):
             if self._preview_src is not None:
                 self._preview_src.seek(idx)
                 frame = self._preview_src.copy()
+                # Respect the GIF's per-frame duration for preview pacing
+                d = self._preview_src.info.get("duration", 0)
+                self._preview_delay = max(10, int(d)) if d else 100
             elif self._preview_slices:
                 s, e = self._preview_slices[idx]
                 frame = Image.open(io.BytesIO(self._preview_zt_data[s:e]))
+                # .zt has no timing; match the selected frame rate
+                fps = int(self.fps_var.get())
+                self._preview_delay = max(10, int(1000 / fps))
             else:
                 return
             self._show_preview_image(self._preview_transform(frame))
@@ -353,7 +360,8 @@ class LCDApp(tk.Tk):
             return
         self._preview_idx = (self._preview_idx + 1) % total
         self._render_preview_frame(self._preview_idx)
-        self._preview_job = self.after(80, self._animate_preview)
+        delay = getattr(self, "_preview_delay", 80)
+        self._preview_job = self.after(delay, self._animate_preview)
 
     def _stop_preview(self):
         if self._preview_job:
