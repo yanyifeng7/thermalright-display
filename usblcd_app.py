@@ -156,6 +156,10 @@ class LCDApp(tk.Tk):
         self._preview_frames: list[tk.PhotoImage] = []
         self._preview_idx = 0
         self._preview_job: str | None = None
+        self._preview_src = None
+        self._preview_slices: list[tuple[int, int]] = []
+        self._preview_zt_data: bytes | None = None
+        self._preview_total = 1
         self._draw_preview_placeholder("No preview")
 
         # Status
@@ -220,12 +224,15 @@ class LCDApp(tk.Tk):
         )
 
     def _load_preview(self, path: str):
-        """Show the first frame; animate GIFs in the preview canvas."""
+        """Show the first frame; animate the FULL GIF/theme in preview."""
         if self._preview_job:
             self.after_cancel(self._preview_job)
             self._preview_job = None
         self._preview_frames = []
         self._preview_idx = 0
+        self._preview_src = None      # lazy source handle
+        self._preview_slices = []     # .zt: list of (start, end) byte ranges
+        self._preview_total = 1
 
         low = path.lower()
         try:
@@ -261,46 +268,54 @@ class LCDApp(tk.Tk):
 
     def _load_gif_preview(self, path: str):
         src = Image.open(path)
-        n = 0
-        for frame in ImageSequence.Iterator(src):
-            self._preview_frames.append(self._photo_from_image(frame))
-            n += 1
-            if n >= 30:  # cap preview frames for memory
-                break
-        if not self._preview_frames:
-            self._draw_preview_placeholder("No frames")
-            return
-        self._show_preview_frame(self._preview_frames[0])
-        if len(self._preview_frames) > 1:
+        self._preview_src = src
+        self._preview_total = getattr(src, "n_frames", 1) or 1
+        self._show_preview_frame(self._photo_from_image(src))
+        if self._preview_total > 1:
             self._animate_preview()
 
     def _load_zt_preview(self, path: str):
         with open(path, "rb") as f:
             data = f.read()
-        frames = []
+        # Lazy: store byte ranges, decode one per tick
+        slices = []
         pos = 0
-        while len(frames) < 30:
+        while True:
             idx = data.find(b"\xFF\xD8", pos)
             if idx < 0:
                 break
             eoi = data.find(b"\xFF\xD9", idx)
             if eoi < 0:
                 break
-            frames.append(Image.open(io.BytesIO(data[idx : eoi + 2])))
+            slices.append((idx, eoi + 2))
             pos = eoi + 2
-        if not frames:
+        if not slices:
             self._draw_preview_placeholder("No frames")
             return
-        self._preview_frames = [self._photo_from_image(f) for f in frames]
-        self._show_preview_frame(self._preview_frames[0])
-        if len(self._preview_frames) > 1:
+        self._preview_slices = slices
+        self._preview_zt_data = data
+        self._preview_total = len(slices)
+        first = Image.open(io.BytesIO(data[slices[0][0] : slices[0][1]]))
+        self._show_preview_frame(self._photo_from_image(first))
+        if len(slices) > 1:
             self._animate_preview()
 
     def _animate_preview(self):
-        if len(self._preview_frames) < 2:
+        total = self._preview_total
+        if total < 2:
             return
-        self._preview_idx = (self._preview_idx + 1) % len(self._preview_frames)
-        self._show_preview_frame(self._preview_frames[self._preview_idx])
+        self._preview_idx = (self._preview_idx + 1) % total
+        try:
+            if self._preview_src is not None:
+                self._preview_src.seek(self._preview_idx)
+                frame = self._preview_src.copy()
+                self._show_preview_frame(self._photo_from_image(frame))
+            elif self._preview_slices:
+                s, e = self._preview_slices[self._preview_idx]
+                frame = Image.open(io.BytesIO(self._preview_zt_data[s:e]))
+                self._show_preview_frame(self._photo_from_image(frame))
+        except Exception:
+            pass  # skip bad frame, keep animating
         self._preview_job = self.after(80, self._animate_preview)
 
     def _stop_preview(self):
@@ -308,6 +323,8 @@ class LCDApp(tk.Tk):
             self.after_cancel(self._preview_job)
             self._preview_job = None
         self._preview_frames = []
+        self._preview_src = None
+        self._preview_slices = []
 
     def _parse_settings(self):
         res = self.res_var.get().replace(" ", "").split("x")
