@@ -84,6 +84,7 @@ class LCDApp(tk.Tk):
         self.file_path: str | None = None
         self.frames: list[bytes] = []
         self.delays_ms: list[int] = []
+        self._source_frames: list[bytes] = []
         self.player: PlayerThread | None = None
         self.lcd: USBLCD | None = None
 
@@ -404,6 +405,34 @@ class LCDApp(tk.Tk):
         self.bright_label.config(text=str(val))
         if self.file_path:
             self._refresh_preview()
+        # Live-adjust the playing frames: re-encode with new brightness
+        if self.player is not None and self.frames:
+            self._reencode_playing(val)
+
+    def _reencode_playing(self, brightness: int):
+        """Re-encode the current clip's frames with a new brightness.
+
+        Re-encodes from the cached pre-brightness frames (avoiding
+        double-compression), mutating the shared list in place so the
+        running player picks it up. Runs in a background thread.
+        """
+        from usblcd.frames import apply_brightness
+
+        quality = int(self.qual_var.get().split("(")[1].rstrip(")"))
+        source = list(self._source_frames if self._source_frames else self.frames)
+
+        def worker():
+            new_frames = []
+            for f in source:
+                img = Image.open(io.BytesIO(f)).convert("RGB")
+                img = apply_brightness(img, brightness)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=quality)
+                new_frames.append(buf.getvalue())
+            # Mutate the shared list in place so the running player picks it up
+            self.frames[:] = new_frames
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _load_clip(self):
         """Load + pre-encode frames from the selected file."""
@@ -453,6 +482,7 @@ class LCDApp(tk.Tk):
         if not frames:
             return False
         self.frames, self.delays_ms = frames, delays
+        self._source_frames = list(frames)  # pre-brightness copies for live re-encode
         return True
 
     @staticmethod
