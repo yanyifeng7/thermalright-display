@@ -38,6 +38,7 @@ ROTATIONS = ["0°", "90°", "180°", "270°"]
 QUALITY_LEVELS = ["High (95)", "Good (85)", "Medium (75)", "Low (60)"]
 FPS_CHOICES = ["5", "10", "15", "20", "24", "30", "60"]
 SCALE_MODES = ["Fit (letterbox)", "Fill (crop)", "Stretch (fill screen)"]
+OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"]
 
 
 class PlayerThread(threading.Thread):
@@ -78,6 +79,87 @@ class PlayerThread(threading.Thread):
             self.on_loop(loop)
 
 
+class MonitorThread(threading.Thread):
+    """Polls sensors at 1 Hz; re-encodes playing frames with the overlay
+    when a quantized value changes (render-on-change, capped ~2 Hz)."""
+
+    def __init__(self, app, frames: list[bytes], delays_ms: list[int],
+                 width: int, height: int, on_status):
+        super().__init__(daemon=True)
+        self.app = app
+        self.frames = frames          # shared list (mutated in place)
+        self.delays_ms = delays_ms
+        self.width = width
+        self.height = height
+        self.on_status = on_status
+        self._stop = threading.Event()
+        self._last_key: tuple | None = None
+        self._sensor = None
+
+    def stop(self):
+        self._stop.set()
+
+    def _sensor_monitor(self):
+        if self._sensor is None:
+            from usblcd.sensors import SensorMonitor
+
+            self._sensor = SensorMonitor()
+        return self._sensor
+
+    def run(self):
+        from usblcd.frames import draw_monitor_overlay
+        from PIL import Image
+        import io as _io
+
+        sensor = self._sensor_monitor()
+        quality = int(self.app.qual_var.get().split("(")[1].rstrip(")"))
+        rotate = int(self.app.rot_var.get().replace("°", ""))
+        position = self.app.overlay_pos_var.get()
+        source = list(self.app._source_frames)  # pre-brightness frames
+
+        while not self._stop.is_set():
+            r = sensor.read()
+            # Quantize so tiny freq jitter doesn't trigger re-encodes
+            key = (
+                round(r.cpu_freq_mhz / 100) if r.cpu_freq_mhz else None,
+                round(r.gpu_freq_mhz / 50) if r.gpu_freq_mhz else None,
+                round(r.gpu_temp_c) if r.gpu_temp_c else None,
+            )
+            if key != self._last_key:
+                self._last_key = key
+                try:
+                    new_frames = []
+                    for f in source:
+                        img = Image.open(_io.BytesIO(f)).convert("RGB")
+                        img = draw_monitor_overlay(
+                            img,
+                            gpu_temp_c=r.gpu_temp_c,
+                            gpu_freq_mhz=r.gpu_freq_mhz,
+                            cpu_freq_mhz=r.cpu_freq_mhz,
+                            rotate=rotate,
+                            position=position,
+                        )
+                        buf = _io.BytesIO()
+                        img.save(buf, format="JPEG", quality=quality)
+                        new_frames.append(buf.getvalue())
+                    # In-place so the running player picks it up
+                    self.frames[:] = new_frames
+                    if self.on_status:
+                        self.on_status(
+                            f"Monitor: CPU {r.cpu_freq_mhz/1000:.2f} GHz"
+                            f" | GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c}C"
+                        )
+                except Exception:
+                    pass
+            self._stop.wait(1.0)
+
+        if self._sensor is not None:
+            try:
+                self._sensor.shutdown()
+            except Exception:
+                pass
+
+
 class LCDApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -91,6 +173,7 @@ class LCDApp(tk.Tk):
         self.delays_ms: list[int] = []
         self._source_frames: list[bytes] = []
         self.player: PlayerThread | None = None
+        self.monitor: MonitorThread | None = None
         self.lcd: USBLCD | None = None
 
         self._build_ui()
@@ -172,6 +255,16 @@ class LCDApp(tk.Tk):
         self.loop_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var).grid(
             row=row, column=1, sticky="w", pady=4)
+        self.monitor_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(settings, text="Monitor overlay (CPU/GPU)",
+                        variable=self.monitor_var).grid(
+            row=row, column=2, columnspan=2, sticky="w", pady=4)
+
+        row += 1
+        ttk.Label(settings, text="Overlay pos:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        self.overlay_pos_var = tk.StringVar(value=OVERLAY_POSITIONS[0])
+        ttk.Combobox(settings, textvariable=self.overlay_pos_var, values=OVERLAY_POSITIONS,
+                     state="readonly", width=16).grid(row=row, column=1, sticky="w", pady=4)
 
         # Live preview: refresh when display-affecting settings change
         for var in (self.res_var, self.rot_var, self.scale_var):
@@ -684,11 +777,23 @@ class LCDApp(tk.Tk):
             on_error=self._on_player_error, on_loop=self._on_loop,
         )
         self.player.start()
+        # Monitor overlay: poll sensors + re-encode on change
+        self.monitor = None
+        if self.monitor_var.get():
+            self.monitor = MonitorThread(
+                self, self.frames, self.delays_ms, width, height,
+                on_status=self._set_status,
+            )
+            self.monitor.start()
         self.play_btn.config(text="Pause")
         self.stop_btn.config(state="normal")
         self._set_status(f"Playing: {n} frames, ~{total // n} KB/frame", "#1a8a3a")
 
     def _stop_play(self):
+        if self.monitor is not None:
+            self.monitor.stop()
+            self.monitor.join(timeout=2)
+            self.monitor = None
         if self.player is not None:
             self.player.stop()
             self.player.join(timeout=2)

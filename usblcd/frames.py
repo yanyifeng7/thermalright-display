@@ -69,6 +69,100 @@ def apply_brightness(img: Image.Image, brightness: int) -> Image.Image:
     return Image.blend(img, black, alpha / 255.0)
 
 
+def draw_monitor_overlay(
+    img: Image.Image,
+    gpu_temp_c=None,
+    gpu_freq_mhz=None,
+    cpu_freq_mhz=None,
+    rotate: int = 0,
+    position: str = "top-left",
+) -> Image.Image:
+    """Draw a small sensor text block in a chosen corner.
+
+    The panel is 1600x720 (or 960x720 etc.); the overlay is drawn at a
+    size proportional to the image width so it scales across resolutions.
+    `rotate` (0/90/180/270) rotates the text block to match the frame
+    rotation, so the readings stay upright when the panel flips the image.
+    `position` is the DISPLAYED corner: top-left / top-right / bottom-left /
+    bottom-right (the block is repositioned so it lands there after the
+    panel's physical flip). Returns a copy — input not modified.
+    """
+    from PIL import ImageDraw, ImageFont
+
+    img = img.convert("RGB").copy()
+    w, h = img.size
+    font_px = max(18, w // 48)  # ~33px at 1600 wide (bigger than before)
+    pad = font_px // 2
+
+    lines = []
+    if cpu_freq_mhz is not None:
+        lines.append(f"CPU {cpu_freq_mhz / 1000:.2f} GHz")
+    if gpu_freq_mhz is not None:
+        lines.append(f"GPU {gpu_freq_mhz} MHz")
+    if gpu_temp_c is not None:
+        lines.append(f"GPU {gpu_temp_c:.0f} C")
+
+    if not lines:
+        return img
+
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype("arial.ttf", font_px)
+    # Measure the widest line
+    line_w = max(draw.textlength(t, font=font) for t in lines)
+    box_w = int(line_w) + pad * 2
+    box_h = len(lines) * (font_px + 6) + pad * 2
+
+    # Build the text block on its own layer so it can be rotated
+    block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(block)
+    bd.rectangle([0, 0, box_w - 1, box_h - 1], fill=(0, 0, 0, 140))
+    y = pad + 2
+    for t in lines:
+        bd.text((pad + 2, y), t, fill=(255, 255, 255), font=font)
+        y += font_px + 6
+
+    # Rotate the block the SAME way the GIF/image is rotated so the text
+    # ends up upright after the panel's physical flip
+    if rotate:
+        block = block.rotate(-rotate, expand=True)
+
+    def _rot_point(px, py, angle_deg):
+        """Rotate a point around the frame center by angle (deg)."""
+        import math
+
+        rad = math.radians(angle_deg)
+        cx, cy = w / 2.0, h / 2.0
+        dx, dy = px - cx, py - cy
+        return (
+            cx + dx * math.cos(rad) - dy * math.sin(rad),
+            cy + dx * math.sin(rad) + dy * math.cos(rad),
+        )
+
+    # Desired DISPLAYED corner -> anchor the block top-left in SENT coords
+    if position == "top-right":
+        ax, ay = _rot_point(w - pad, pad, -rotate)
+        pos = (int(ax - block.width), int(ay))
+    elif position == "bottom-left":
+        ax, ay = _rot_point(pad, h - pad, -rotate)
+        pos = (int(ax), int(ay - block.height))
+    elif position == "bottom-right":
+        ax, ay = _rot_point(w - pad, h - pad, -rotate)
+        pos = (int(ax - block.width), int(ay - block.height))
+    else:  # top-left (default)
+        ax, ay = _rot_point(pad, pad, -rotate)
+        pos = (int(ax), int(ay))
+
+    # Clamp so the block stays fully inside the frame
+    pos = (
+        max(0, min(pos[0], w - block.width)),
+        max(0, min(pos[1], h - block.height)),
+    )
+
+    img = img.convert("RGBA")
+    img.paste(block, pos, block)  # block used as its own alpha mask
+    return img.convert("RGB")
+
+
 def image_to_rgb565(img: Image.Image) -> bytes:
     """Convert a PIL image (RGB) to the raw RGB565 byte stream."""
     img = img.convert("RGB")
