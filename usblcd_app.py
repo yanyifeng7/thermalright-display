@@ -146,14 +146,27 @@ class LCDApp(tk.Tk):
         ttk.Combobox(settings, textvariable=self.scale_var, values=SCALE_MODES,
                      state="readonly", width=18).grid(row=row, column=1, sticky="w", pady=4)
 
-        ttk.Label(settings, text="Loop:").grid(row=row, column=2, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Brightness:").grid(row=row, column=2, sticky="w", padx=10, pady=4)
+        self.bright_var = tk.IntVar(value=100)
+        bright_frame = ttk.Frame(settings)
+        bright_frame.grid(row=row, column=3, sticky="w", pady=4)
+        self.bright_scale = ttk.Scale(bright_frame, from_=0, to=100,
+                                      variable=self.bright_var, length=90,
+                                      command=self._on_brightness)
+        self.bright_scale.pack(side="left")
+        self.bright_label = ttk.Label(bright_frame, text="100", width=4)
+        self.bright_label.pack(side="left", padx=4)
+
+        row += 1
+        ttk.Label(settings, text="Loop:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
         self.loop_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var).grid(
-            row=row, column=3, sticky="w", pady=4)
+            row=row, column=1, sticky="w", pady=4)
 
         # Live preview: refresh when display-affecting settings change
         for var in (self.res_var, self.rot_var, self.scale_var):
             var.trace_add("write", lambda *a: self._refresh_preview())
+        self.bright_var.trace_add("write", lambda *a: self._on_brightness())
 
         # Preview
         preview_frame = ttk.LabelFrame(self, text=" Preview ")
@@ -246,7 +259,7 @@ class LCDApp(tk.Tk):
         Mirrors the encode path (_scale -> rotate -> _scale) but renders into
         a ~640px-wide box instead of the full 1600x720 panel — ~6x less work.
         """
-        width, height, rotate, _, _, scale = self._parse_settings()
+        width, height, rotate, _, _, scale, brightness = self._parse_settings()
         pw = 640
         ph = max(1, round(pw * height / width))
         target = (pw, ph)
@@ -254,6 +267,9 @@ class LCDApp(tk.Tk):
         if rotate:
             img = img.rotate(-rotate, expand=True)
             img = self._scale(img, target, scale)
+        from usblcd.frames import apply_brightness
+
+        img = apply_brightness(img, brightness)
         return img
 
     def _draw_preview_placeholder(self, text: str):
@@ -379,13 +395,21 @@ class LCDApp(tk.Tk):
         quality = int(self.qual_var.get().split("(")[1].rstrip(")"))
         fps = int(self.fps_var.get())
         scale = self.scale_var.get().split(" ")[0].lower()
-        return width, height, rotate, quality, fps, scale
+        brightness = int(self.bright_var.get())
+        return width, height, rotate, quality, fps, scale, brightness
+
+    def _on_brightness(self, *args):
+        """Update brightness label + live preview while sliding."""
+        val = int(self.bright_var.get())
+        self.bright_label.config(text=str(val))
+        if self.file_path:
+            self._refresh_preview()
 
     def _load_clip(self):
         """Load + pre-encode frames from the selected file."""
         if not self.file_path:
             return False
-        width, height, rotate, quality, fps, scale = self._parse_settings()
+        width, height, rotate, quality, fps, scale, brightness = self._parse_settings()
         target = (width, height)
         path = self.file_path
         low = path.lower()
@@ -403,7 +427,7 @@ class LCDApp(tk.Tk):
                 if eoi < 0:
                     break
                 img = Image.open(io.BytesIO(data[idx : eoi + 2])).convert("RGB")
-                frames.append(self._encode(img, target, rotate, quality, scale))
+                frames.append(self._encode(img, target, rotate, quality, scale, brightness))
                 delays.append(int(1000 / fps))
                 pos = eoi + 2
         elif low.endswith(".gif"):
@@ -414,7 +438,7 @@ class LCDApp(tk.Tk):
                 if rotate:
                     canvas = canvas.rotate(-rotate, expand=True)
                     canvas = self._scale(canvas, target, scale)
-                frames.append(self._encode(canvas, target, 0, quality, scale))
+                frames.append(self._encode(canvas, target, 0, quality, scale, brightness))
                 d = frame.info.get("duration", 0)
                 delays.append(max(10, int(d)) if d else 100)
         else:  # static image
@@ -423,7 +447,7 @@ class LCDApp(tk.Tk):
             if rotate:
                 img = img.rotate(-rotate, expand=True)
                 img = self._scale(img, target, scale)
-            frames.append(self._encode(img, target, 0, quality, scale))
+            frames.append(self._encode(img, target, 0, quality, scale, brightness))
             delays.append(1000)
 
         if not frames:
@@ -464,11 +488,14 @@ class LCDApp(tk.Tk):
         return canvas
 
     @staticmethod
-    def _encode(img, target, rotate, quality, scale="fit"):
+    def _encode(img, target, rotate, quality, scale="fit", brightness=100):
+        from usblcd.frames import apply_brightness
+
         img = img.convert("RGB")
         if rotate:
             img = img.rotate(-rotate, expand=True)
             img = LCDApp._scale(img, target, scale)
+        img = apply_brightness(img, brightness)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
         return buf.getvalue()
@@ -524,7 +551,7 @@ class LCDApp(tk.Tk):
             return
 
         n = len(self.frames)
-        width, height, _, _, _, _ = self._parse_settings()
+        width, height, _, _, _, _, _ = self._parse_settings()
         total = sum(len(f) for f in self.frames)
         self.player = PlayerThread(
             self.lcd, self.frames, self.delays_ms, width, height,

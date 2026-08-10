@@ -52,6 +52,23 @@ def jpeg_to_frame(jpeg: bytes, width: int, height: int) -> bytes:
     return make_frame_header(width, height, len(jpeg)) + jpeg
 
 
+def apply_brightness(img: Image.Image, brightness: int) -> Image.Image:
+    """Apply TRCC-style brightness (0-100) via black overlay.
+
+    TRCC never sends a BKL_SET USB command — it dims in software by drawing
+    a black overlay with alpha = (100 - brightness) * 255 / 100 over each
+    frame before JPEG encoding (UCScreenImage.cs:1089-1093).
+    brightness 100 = no overlay; 0 = fully black (screen off).
+    """
+    if brightness >= 100:
+        return img
+    alpha = (100 - brightness) * 255 // 100
+    if alpha <= 0:
+        return img
+    black = Image.new("RGB", img.size, (0, 0, 0))
+    return Image.blend(img, black, alpha / 255.0)
+
+
 def image_to_rgb565(img: Image.Image) -> bytes:
     """Convert a PIL image (RGB) to the raw RGB565 byte stream."""
     img = img.convert("RGB")

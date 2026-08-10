@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+# Commands (SSCRM_CMD_TYPE_*)
+CMD_DEV_INFO = 1
+CMD_PICTURE = 2
+CMD_LOGO = 3
+CMD_OTA = 4
+CMD_UPG_STATE = 5
+CMD_ROTATE = 6
+CMD_SCR_SET = 7
+CMD_BKL_SET = 8
+CMD_LOGO_STATE = 9
+
 # Shared-memory control words (TRCC ↔ USBLCDNEW handshake)
 # These are used in the original two-process architecture; a standalone
 # tool can skip shared memory and talk to the USB device directly.
