@@ -7,7 +7,14 @@ Lightweight replacement for TRCC's USB LCD pipeline — push images/GIFs directl
 Verified end-to-end on a GIGABYTE AIO (USBDISPLAY 0x87AD:0x70DB):
 - Device open + handshake ✅
 - JPEG frame display ✅ (1600x720, 64-byte header + JPEG payload)
+- Animation playback ✅ (GIF and .zt themes at 24 fps)
 - Orientation control ✅ (panel mounts upside-down in some AIOs — use `--rotate 180`)
+
+### Gotchas discovered (hardware-verified)
+1. **Every frame MUST be wrapped in the 64-byte PICTURE header** — raw JPEG gets silently ignored (display shows boot logo)
+2. **Raw .zt JPEG bytes are rejected by the display decoder** — always re-encode through PIL first (TRCC does the same internally)
+3. **The device holds the last frame indefinitely** on USB idle — no blanking worry for static images
+4. **Killing a process that holds the device wedges the USB handle** — Windows needs a device replug (or disable/enable) to recover; always exit cleanly
 
 ## Supported devices
 
@@ -68,6 +75,8 @@ Frame count = GIF animation length. See `docs/zt-format.md`.
 pip install -r requirements.txt
 python send_image.py --image frame.jpg --width 1600 --height 720
 python send_image.py --image frame.jpg --width 1600 --height 720 --rotate 180 --stay
+python gif_player.py --gif anim.gif --width 1600 --height 720 --rotate 180
+python gif_player.py --gif theme.zt --width 1600 --height 720 --rotate 180 --fps 24
 ```
 
 `--stay` re-sends the frame every second (panels blank on USB idle in some cases) with auto-reconnect.
