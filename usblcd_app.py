@@ -169,6 +169,7 @@ class LCDApp(tk.Tk):
         self._preview_src = None
         self._preview_slices: list[tuple[int, int]] = []
         self._preview_zt_data: bytes | None = None
+        self._preview_static = None
         self._preview_total = 1
         self._draw_preview_placeholder("No preview")
 
@@ -228,16 +229,26 @@ class LCDApp(tk.Tk):
     # ---------- Preview ----------
 
     def _refresh_preview(self):
-        """Reload preview when Resolution/Rotation/Scale changes."""
-        if self.file_path:
-            self._load_preview(self.file_path)
+        """Re-render the current frame with new settings (no file re-open)."""
+        if self._preview_src is not None:
+            self._render_preview_frame(self._preview_idx)
+        elif self._preview_slices:
+            self._render_preview_frame(self._preview_idx)
+        elif self._preview_static is not None:
+            self._show_preview_image(self._preview_transform(self._preview_static))
         else:
             self._draw_preview_placeholder("No preview")
 
-    def _panel_transform(self, img: Image.Image) -> Image.Image:
-        """Apply the current panel settings (scale mode, rotation, res)."""
+    def _preview_transform(self, img: Image.Image) -> Image.Image:
+        """Apply panel settings at preview scale (fast, aspect-accurate).
+
+        Mirrors the encode path (_scale -> rotate -> _scale) but renders into
+        a ~640px-wide box instead of the full 1600x720 panel — ~6x less work.
+        """
         width, height, rotate, _, _, scale = self._parse_settings()
-        target = (width, height)
+        pw = 640
+        ph = max(1, round(pw * height / width))
+        target = (pw, ph)
         img = self._scale(img, target, scale)
         if rotate:
             img = img.rotate(-rotate, expand=True)
@@ -251,29 +262,72 @@ class LCDApp(tk.Tk):
         )
 
     def _load_preview(self, path: str):
-        """Show the first frame; animate the FULL GIF/theme in preview."""
+        """Open source once; render frames at preview scale."""
         if self._preview_job:
             self.after_cancel(self._preview_job)
             self._preview_job = None
         self._preview_frames = []
         self._preview_idx = 0
-        self._preview_src = None      # lazy source handle
+        self._preview_src = None      # lazy GIF source handle
         self._preview_slices = []     # .zt: list of (start, end) byte ranges
+        self._preview_static = None   # static image (PIL, unrendered)
         self._preview_total = 1
 
         low = path.lower()
         try:
             if low.endswith(".gif"):
-                self._load_gif_preview(path)
+                src = Image.open(path)
+                self._preview_src = src
+                self._preview_total = getattr(src, "n_frames", 1) or 1
+                self._render_preview_frame(0)
+                if self._preview_total > 1:
+                    self._animate_preview()
             elif low.endswith(".zt"):
-                self._load_zt_preview(path)
+                with open(path, "rb") as f:
+                    data = f.read()
+                slices = []
+                pos = 0
+                while True:
+                    idx = data.find(b"\xFF\xD8", pos)
+                    if idx < 0:
+                        break
+                    eoi = data.find(b"\xFF\xD9", idx)
+                    if eoi < 0:
+                        break
+                    slices.append((idx, eoi + 2))
+                    pos = eoi + 2
+                if not slices:
+                    self._draw_preview_placeholder("No frames")
+                    return
+                self._preview_slices = slices
+                self._preview_zt_data = data
+                self._preview_total = len(slices)
+                self._render_preview_frame(0)
+                if len(slices) > 1:
+                    self._animate_preview()
             else:
-                self._load_static_preview(path)
+                self._preview_static = Image.open(path).convert("RGB")
+                self._show_preview_image(self._preview_transform(self._preview_static))
         except Exception as e:
             self._draw_preview_placeholder(f"Preview failed: {e}")
 
+    def _render_preview_frame(self, idx: int):
+        """Transform + show frame idx at preview scale."""
+        try:
+            if self._preview_src is not None:
+                self._preview_src.seek(idx)
+                frame = self._preview_src.copy()
+            elif self._preview_slices:
+                s, e = self._preview_slices[idx]
+                frame = Image.open(io.BytesIO(self._preview_zt_data[s:e]))
+            else:
+                return
+            self._show_preview_image(self._preview_transform(frame))
+        except Exception:
+            pass  # skip bad frame
+
     def _photo_from_image(self, img: Image.Image) -> tk.PhotoImage:
-        """Scale an image to the preview canvas and convert to PhotoImage."""
+        """Convert a PIL image to a PhotoImage sized for the canvas."""
         img = img.convert("RGB")
         cw, ch = 320, 144
         iw, ih = img.size
@@ -284,70 +338,21 @@ class LCDApp(tk.Tk):
         img.save(buf, format="PNG")
         return tk.PhotoImage(data=buf.getvalue())
 
+    def _show_preview_image(self, img: Image.Image):
+        """Show a PIL image (already panel-transformed) in the canvas."""
+        self._show_preview_frame(self._photo_from_image(img))
+
     def _show_preview_frame(self, photo: tk.PhotoImage):
         self.preview_canvas.delete("all")
         self.preview_canvas.create_image(160, 72, image=photo)
         self._preview_photo = photo  # keep reference
-
-    def _load_static_preview(self, path: str):
-        img = Image.open(path)
-        img = self._panel_transform(img)
-        self._show_preview_frame(self._photo_from_image(img))
-
-    def _load_gif_preview(self, path: str):
-        src = Image.open(path)
-        self._preview_src = src
-        self._preview_total = getattr(src, "n_frames", 1) or 1
-        frame = self._panel_transform(src.copy())
-        self._show_preview_frame(self._photo_from_image(frame))
-        if self._preview_total > 1:
-            self._animate_preview()
-
-    def _load_zt_preview(self, path: str):
-        with open(path, "rb") as f:
-            data = f.read()
-        # Lazy: store byte ranges, decode one per tick
-        slices = []
-        pos = 0
-        while True:
-            idx = data.find(b"\xFF\xD8", pos)
-            if idx < 0:
-                break
-            eoi = data.find(b"\xFF\xD9", idx)
-            if eoi < 0:
-                break
-            slices.append((idx, eoi + 2))
-            pos = eoi + 2
-        if not slices:
-            self._draw_preview_placeholder("No frames")
-            return
-        self._preview_slices = slices
-        self._preview_zt_data = data
-        self._preview_total = len(slices)
-        first = Image.open(io.BytesIO(data[slices[0][0] : slices[0][1]]))
-        first = self._panel_transform(first)
-        self._show_preview_frame(self._photo_from_image(first))
-        if len(slices) > 1:
-            self._animate_preview()
 
     def _animate_preview(self):
         total = self._preview_total
         if total < 2:
             return
         self._preview_idx = (self._preview_idx + 1) % total
-        try:
-            if self._preview_src is not None:
-                self._preview_src.seek(self._preview_idx)
-                frame = self._preview_src.copy()
-                frame = self._panel_transform(frame)
-                self._show_preview_frame(self._photo_from_image(frame))
-            elif self._preview_slices:
-                s, e = self._preview_slices[self._preview_idx]
-                frame = Image.open(io.BytesIO(self._preview_zt_data[s:e]))
-                frame = self._panel_transform(frame)
-                self._show_preview_frame(self._photo_from_image(frame))
-        except Exception:
-            pass  # skip bad frame, keep animating
+        self._render_preview_frame(self._preview_idx)
         self._preview_job = self.after(80, self._animate_preview)
 
     def _stop_preview(self):
@@ -357,6 +362,7 @@ class LCDApp(tk.Tk):
         self._preview_frames = []
         self._preview_src = None
         self._preview_slices = []
+        self._preview_static = None
 
     def _parse_settings(self):
         res = self.res_var.get().replace(" ", "").split("x")
