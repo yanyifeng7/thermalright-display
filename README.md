@@ -86,7 +86,13 @@ header:
 MJPEG container: N × JPEG frames at device resolution (e.g. 1600x720).
 Frame count = GIF animation length. See `docs/zt-format.md`.
 
-## Usage
+## Installation
+
+**Easiest path: install Python 3.10+ (tick "Add to PATH"), then double-click
+[`start_gui.bat`](INSTALL.md)** — it creates the venv, installs dependencies,
+and opens the GUI. No admin needed. Full guide: [INSTALL.md](INSTALL.md).
+
+Manual / CLI setup:
 
 ```
 pip install -r requirements.txt
