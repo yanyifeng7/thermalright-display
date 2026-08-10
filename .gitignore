@@ -28,5 +28,8 @@ htmlcov/
 # Local config (never commit device-specific settings)
 *.local.conf
 
+# User-saved themes (created at runtime by the GUI)
+themes/
+
 # Logs
 *.log

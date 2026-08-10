@@ -7,16 +7,21 @@ Zero-dependency desktop app (tkinter ships with Python).
 from __future__ import annotations
 
 import io
+import os
+import re
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageSequence
 
 from usblcd.device import USBLCD, LCDDeviceError
 from usblcd.frames import jpeg_to_frame
+
+# Project root: directory containing this file
+_PROJECT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 APP_NAME = "usblcd-display"
 DEVICE_LABEL = "USBDISPLAY (0x87AD:0x70DB)"
@@ -211,6 +216,9 @@ class LCDApp(tk.Tk):
         self.stop_btn = ttk.Button(ctrl, text="Stop", command=self._stop_play,
                                    state="disabled")
         self.stop_btn.pack(side="left", ipadx=12, ipady=2)
+        self.save_btn = ttk.Button(ctrl, text="Save Theme…", command=self._save_theme,
+                                   state="disabled")
+        self.save_btn.pack(side="left", padx=8, ipadx=12, ipady=2)
 
         # Progress
         self.progress = ttk.Progressbar(self, mode="indeterminate")
@@ -532,6 +540,7 @@ class LCDApp(tk.Tk):
             return False
         self.frames, self.delays_ms = frames, delays
         self._source_frames = list(frames)  # pre-brightness copies for live re-encode
+        self.save_btn.config(state="normal")
         return True
 
     @staticmethod
@@ -649,6 +658,43 @@ class LCDApp(tk.Tk):
         self.play_btn.config(text="Play")
         self.stop_btn.config(state="disabled")
         self.progress.stop()
+
+    def _save_theme(self):
+        """Save the current clip as a .zt theme in the project themes/ dir."""
+        if not self.frames:
+            self._set_status("Load a file first", "#c0392b")
+            return
+
+        # themes/ dir next to the project root (parent of this file)
+        themes_dir = os.path.join(_PROJECT_ROOT_DIR, "themes")
+        os.makedirs(themes_dir, exist_ok=True)
+
+        # Suggest a name from the source file
+        base = ""
+        if self.file_path:
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+        name = simpledialog.askstring(
+            "Save theme", "Theme name:",
+            initialvalue=base or "theme", parent=self,
+        )
+        if not name:
+            return
+        # Sanitize filename
+        name = re.sub(r'[^A-Za-z0-9_\- ]+', '', name).strip() or "theme"
+
+        fps = int(self.fps_var.get())
+        dest = os.path.join(themes_dir, f"{name}.zt")
+        try:
+            from usblcd.ztfile import frames_to_zt
+
+            data = frames_to_zt(self.frames, name=name, fps=fps)
+            with open(dest, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            self._set_status(f"Save failed: {e}", "#c0392b")
+            return
+
+        self._set_status(f"Saved: {name}.zt ({len(self.frames)} frames)", "#1a8a3a")
 
     def _on_player_error(self, msg):
         self.after(0, lambda: (self._stop_play(),
