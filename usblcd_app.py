@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import io
 import os
-import re
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, ttk
 
 from PIL import Image, ImageSequence
 
@@ -219,11 +218,13 @@ class MonitorThread(threading.Thread):
 
 class LCDApp(tk.Tk):
     def __init__(self):
+        from usblcd import theme
+
         super().__init__()
         self.title(f"{APP_NAME} — AIO LCD player")
-        self.geometry("640x1010")
+        self.geometry("640x1030")
         self.resizable(False, False)
-        self.configure(bg="#f0f0f0")
+        self.configure(bg=theme.BG)
 
         self.file_path: str | None = None
         self.frames: list[bytes] = []
@@ -235,101 +236,134 @@ class LCDApp(tk.Tk):
         self._stop_play_requested = False
 
         self._build_ui()
+        self._load_config()
         self._set_status("Not connected", "#888")
 
     # ---------- UI ----------
 
     def _build_ui(self):
+        from usblcd import theme
+
         style = ttk.Style()
-        try:
-            style.theme_use("vista")
-        except tk.TclError:
-            pass
+        theme.setup_style(style)
+
+        # Combobox dropdown popup (tk-level option, applies to all)
+        self.option_add("*TCombobox*Listbox.background", theme.INPUT)
+        self.option_add("*TCombobox*Listbox.foreground", theme.TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", theme.ACCENT)
+        self.option_add("*TCombobox*Listbox.selectForeground", theme.ACCENT_TEXT)
+        self.option_add("*TCombobox*Listbox.borderWidth", "0")
 
         pad = {"padx": 14, "pady": 6}
 
         # Header
-        header = tk.Label(self, text=APP_NAME, font=("Segoe UI", 16, "bold"),
-                          bg="#f0f0f0", fg="#1a1a1a")
+        header = tk.Label(self, text=APP_NAME, font=(theme.FONT_BOLD, 16, "bold"),
+                          bg=theme.BG, fg=theme.TEXT)
         header.pack(anchor="w", **pad)
-
-        # File picker — consolidated into the Playlist panel below.
-        # (Single-file Browse was redundant with Playlist's Add File….)
+        sub = tk.Label(self, text="AIO LCD player — GIFs, themes & live monitoring",
+                       font=(theme.FONT, 9), bg=theme.BG, fg=theme.TEXT_DIM)
+        sub.pack(anchor="w", padx=14, pady=(0, 8))
 
         # Settings grid
-        settings = ttk.LabelFrame(self, text=" Display settings ")
+        settings = ttk.LabelFrame(self, text=" Display settings ",
+                                  style="Dark.TLabelframe")
         settings.pack(fill="x", **pad)
 
         row = 0
-        ttk.Label(settings, text="Resolution:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Resolution:", style="Dark.TLabel").grid(
+            row=row, column=0, sticky="w", padx=10, pady=5)
         self.res_var = tk.StringVar(value=RESOLUTIONS[0])
         ttk.Combobox(settings, textvariable=self.res_var, values=RESOLUTIONS,
-                     state="readonly", width=14).grid(row=row, column=1, sticky="w", pady=4)
+                     state="readonly", width=14, style="Dark.TCombobox").grid(
+            row=row, column=1, sticky="w", pady=5)
 
-        ttk.Label(settings, text="Rotation:").grid(row=row, column=2, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Rotation:", style="Dark.TLabel").grid(
+            row=row, column=2, sticky="w", padx=10, pady=5)
         self.rot_var = tk.StringVar(value=ROTATIONS[2])  # 180° = upside-down panels
         ttk.Combobox(settings, textvariable=self.rot_var, values=ROTATIONS,
-                     state="readonly", width=6).grid(row=row, column=3, sticky="w", pady=4)
+                     state="readonly", width=6, style="Dark.TCombobox").grid(
+            row=row, column=3, sticky="w", pady=5)
 
         row += 1
-        ttk.Label(settings, text="Quality:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Quality:", style="Dark.TLabel").grid(
+            row=row, column=0, sticky="w", padx=10, pady=5)
         self.qual_var = tk.StringVar(value=QUALITY_LEVELS[0])
         ttk.Combobox(settings, textvariable=self.qual_var, values=QUALITY_LEVELS,
-                     state="readonly", width=14).grid(row=row, column=1, sticky="w", pady=4)
+                     state="readonly", width=14, style="Dark.TCombobox").grid(
+            row=row, column=1, sticky="w", pady=5)
 
-        ttk.Label(settings, text="Frame rate:").grid(row=row, column=2, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Frame rate:", style="Dark.TLabel").grid(
+            row=row, column=2, sticky="w", padx=10, pady=5)
         self.fps_var = tk.StringVar(value="24")
         ttk.Combobox(settings, textvariable=self.fps_var, values=FPS_CHOICES,
-                     state="readonly", width=6).grid(row=row, column=3, sticky="w", pady=4)
+                     state="readonly", width=6, style="Dark.TCombobox").grid(
+            row=row, column=3, sticky="w", pady=5)
 
         row += 1
-        ttk.Label(settings, text="Scale:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Scale:", style="Dark.TLabel").grid(
+            row=row, column=0, sticky="w", padx=10, pady=5)
         self.scale_var = tk.StringVar(value=SCALE_MODES[0])
         ttk.Combobox(settings, textvariable=self.scale_var, values=SCALE_MODES,
-                     state="readonly", width=18).grid(row=row, column=1, sticky="w", pady=4)
+                     state="readonly", width=18, style="Dark.TCombobox").grid(
+            row=row, column=1, sticky="w", pady=5)
 
-        ttk.Label(settings, text="Brightness:").grid(row=row, column=2, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Brightness:", style="Dark.TLabel").grid(
+            row=row, column=2, sticky="w", padx=10, pady=5)
         self.bright_var = tk.IntVar(value=100)
-        bright_frame = ttk.Frame(settings)
-        bright_frame.grid(row=row, column=3, sticky="w", pady=4)
+        bright_frame = ttk.Frame(settings, style="Dark.TFrame")
+        bright_frame.grid(row=row, column=3, sticky="w", pady=5)
         # Click-to-set bar: one click = one brightness change.
         # Snap zones: clicking just outside the left/right end sets 0/100.
         self.bright_canvas = tk.Canvas(bright_frame, width=134, height=22,
-                                       bg="#e8e8e8", highlightthickness=1,
-                                       highlightbackground="#aaa", cursor="hand2")
+                                       bg=theme.INPUT, highlightthickness=1,
+                                       highlightbackground=theme.BORDER,
+                                       cursor="hand2")
         self.bright_canvas.pack(side="left")
         self.bright_canvas.bind("<Button-1>", self._brightness_click)
-        self.bright_label = ttk.Label(bright_frame, text="100", width=4)
+        self.bright_label = ttk.Label(bright_frame, text="100", width=4,
+                                      style="Dark.TLabel")
         self.bright_label.pack(side="left", padx=4)
         self._draw_brightness_bar()
 
         row += 1
-        ttk.Label(settings, text="Loop:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Loop:", style="Dark.TLabel").grid(
+            row=row, column=0, sticky="w", padx=10, pady=5)
         self.loop_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var).grid(
-            row=row, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(settings, text="Repeat forever", variable=self.loop_var,
+                        style="Dark.TCheckbutton").grid(
+            row=row, column=1, sticky="w", pady=5)
         self.monitor_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(settings, text="Monitor overlay (CPU/GPU)",
-                        variable=self.monitor_var).grid(
-            row=row, column=2, columnspan=2, sticky="w", pady=4)
+                        variable=self.monitor_var,
+                        style="Dark.TCheckbutton").grid(
+            row=row, column=2, columnspan=2, sticky="w", pady=5)
 
         row += 1
-        ttk.Label(settings, text="Overlay pos:").grid(row=row, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(settings, text="Overlay pos:", style="Dark.TLabel").grid(
+            row=row, column=0, sticky="w", padx=10, pady=5)
         self.overlay_pos_var = tk.StringVar(value=OVERLAY_POSITIONS[0])
-        ttk.Combobox(settings, textvariable=self.overlay_pos_var, values=OVERLAY_POSITIONS,
-                     state="readonly", width=16).grid(row=row, column=1, sticky="w", pady=4)
+        ttk.Combobox(settings, textvariable=self.overlay_pos_var,
+                     values=OVERLAY_POSITIONS, state="readonly", width=16,
+                     style="Dark.TCombobox").grid(
+            row=row, column=1, sticky="w", pady=5)
 
         # Live preview: refresh when display-affecting settings change
         for var in (self.res_var, self.rot_var, self.scale_var):
             var.trace_add("write", lambda *a: self._refresh_preview())
         self.bright_var.trace_add("write", lambda *a: self._on_brightness())
+        # Persist settings changes (debounced) so they survive restarts
+        for var in (self.res_var, self.rot_var, self.qual_var, self.fps_var,
+                    self.scale_var, self.bright_var, self.loop_var,
+                    self.monitor_var, self.overlay_pos_var):
+            var.trace_add("write", self._schedule_config_save)
 
         # Preview
-        preview_frame = ttk.LabelFrame(self, text=" Preview ")
+        preview_frame = ttk.LabelFrame(self, text=" Preview ",
+                                       style="Dark.TLabelframe")
         preview_frame.pack(fill="x", **pad)
         self.preview_canvas = tk.Canvas(preview_frame, width=320, height=144,
-                                        bg="#1a1a1a", highlightthickness=1,
-                                        highlightbackground="#ccc")
+                                        bg=theme.PREVIEW_BG, highlightthickness=1,
+                                        highlightbackground=theme.BORDER)
         self.preview_canvas.pack(padx=8, pady=8)
         self._preview_photo = None
         self._preview_frames: list[tk.PhotoImage] = []
@@ -343,48 +377,34 @@ class LCDApp(tk.Tk):
         self._preview_delay = 80
         self._draw_preview_placeholder("No preview")
 
-        # My Themes panel
-        themes_frame = ttk.LabelFrame(self, text=" My Themes ")
-        themes_frame.pack(fill="x", **pad)
-        themes_row = ttk.Frame(themes_frame)
-        themes_row.pack(fill="x", padx=8, pady=(6, 0))
-        ttk.Label(themes_row, text="Saved in themes/:").pack(side="left")
-        ttk.Button(themes_row, text="Refresh", command=self._refresh_themes,
-                   width=9).pack(side="right")
-        ttk.Button(themes_row, text="Delete", command=self._delete_theme,
-                   width=9).pack(side="right", padx=4)
-        ttk.Button(themes_row, text="Load", command=self._load_theme,
-                   width=9).pack(side="right", padx=4)
-        self.themes_list = tk.Listbox(themes_frame, height=4,
-                                      selectmode=tk.SINGLE,
-                                      font=("Segoe UI", 9))
-        self.themes_list.pack(fill="x", padx=8, pady=6)
-        self.themes_list.bind("<Double-Button-1>", lambda e: self._load_theme())
-        self._themes_dir = os.path.join(_PROJECT_ROOT_DIR, "themes")
-        os.makedirs(self._themes_dir, exist_ok=True)
-        self._refresh_themes()
-
         # Playlist panel — the single file selector (add, preview, play)
-        pl_frame = ttk.LabelFrame(self, text=" Files ")
+        pl_frame = ttk.LabelFrame(self, text=" Files ",
+                                  style="Dark.TLabelframe")
         pl_frame.pack(fill="x", **pad)
-        pl_row = ttk.Frame(pl_frame)
+        pl_row = ttk.Frame(pl_frame, style="Dark.TFrame")
         pl_row.pack(fill="x", padx=8, pady=(6, 0))
         self.file_label = ttk.Label(pl_row, text="No file selected",
-                                    foreground="#666")
+                                    style="Dark.Dim.TLabel")
         self.file_label.pack(side="left", fill="x", expand=True)
         ttk.Button(pl_row, text="Clear", command=self._playlist_clear,
-                   width=8).pack(side="right", padx=2)
+                   width=8, style="Dark.TButton").pack(side="right", padx=2)
         ttk.Button(pl_row, text="Remove", command=self._playlist_remove,
-                   width=8).pack(side="right", padx=2)
+                   width=8, style="Dark.TButton").pack(side="right", padx=2)
         ttk.Button(pl_row, text="▲", command=lambda: self._playlist_move(-1),
-                   width=3).pack(side="right", padx=1)
+                   width=3, style="Dark.TButton").pack(side="right", padx=1)
         ttk.Button(pl_row, text="▼", command=lambda: self._playlist_move(1),
-                   width=3).pack(side="right", padx=1)
+                   width=3, style="Dark.TButton").pack(side="right", padx=1)
         ttk.Button(pl_row, text="Add File…", command=self._playlist_add,
-                   width=10).pack(side="right", padx=2)
+                   width=10, style="Accent.TButton").pack(side="right", padx=2)
         self.playlist_list = tk.Listbox(pl_frame, height=4,
                                         selectmode=tk.EXTENDED,
-                                        font=("Segoe UI", 9))
+                                        font=(theme.FONT, 9),
+                                        bg=theme.INPUT, fg=theme.TEXT,
+                                        selectbackground=theme.ACCENT,
+                                        selectforeground=theme.ACCENT_TEXT,
+                                        highlightthickness=1,
+                                        highlightbackground=theme.BORDER,
+                                        borderwidth=0)
         self.playlist_list.pack(fill="x", padx=8, pady=6)
         self.playlist_list.bind("<Double-Button-1>", lambda e: self._playlist_play_selected())
         self.playlist_list.bind("<<ListboxSelect>>", lambda e: self._playlist_on_select())
@@ -394,37 +414,40 @@ class LCDApp(tk.Tk):
         self._preload_lock = threading.Lock()
 
         # Status
-        status_frame = ttk.Frame(self)
+        status_frame = ttk.Frame(self, style="Dark.TFrame")
         status_frame.pack(fill="x", **pad)
-        ttk.Label(status_frame, text="Status:").pack(side="left")
-        self.status_label = tk.Label(status_frame, text="", font=("Segoe UI", 10),
-                                     bg="#f0f0f0")
+        ttk.Label(status_frame, text="Status:",
+                  style="Dark.Dim.TLabel").pack(side="left")
+        self.status_label = tk.Label(status_frame, text="", font=(theme.FONT, 10),
+                                     bg=theme.BG, fg=theme.TEXT_DIM)
         self.status_label.pack(side="left", padx=6)
 
         # Controls
-        ctrl = ttk.Frame(self)
+        ctrl = ttk.Frame(self, style="Dark.TFrame")
         ctrl.pack(fill="x", **pad)
-        self.connect_btn = ttk.Button(ctrl, text="Connect", command=self._toggle_connect)
-        self.connect_btn.pack(side="left", ipadx=12, ipady=2)
+        self.connect_btn = ttk.Button(ctrl, text="Connect",
+                                      command=self._toggle_connect,
+                                      style="Dark.TButton")
+        self.connect_btn.pack(side="left", ipadx=12, ipady=3)
         self.play_btn = ttk.Button(ctrl, text="Play", command=self._toggle_play,
-                                   state="disabled")
-        self.play_btn.pack(side="left", padx=8, ipadx=12, ipady=2)
+                                   state="disabled", style="Accent.TButton")
+        self.play_btn.pack(side="left", padx=8, ipadx=12, ipady=3)
         self.stop_btn = ttk.Button(ctrl, text="Stop", command=self._stop_play,
-                                   state="disabled")
-        self.stop_btn.pack(side="left", ipadx=12, ipady=2)
-        self.save_btn = ttk.Button(ctrl, text="Save Theme…", command=self._save_theme,
-                                   state="disabled")
-        self.save_btn.pack(side="left", padx=8, ipadx=12, ipady=2)
+                                   state="disabled", style="Dark.TButton")
+        self.stop_btn.pack(side="left", ipadx=12, ipady=3)
 
         # Progress
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
+        self.progress = ttk.Progressbar(self, mode="indeterminate",
+                                        style="Dark.Horizontal.TProgressbar")
         self.progress.pack(fill="x", padx=14, pady=2)
 
         # Info box
         info = tk.Label(self, text=(
             "Supports: animated GIF, .zt theme files, static images\n"
-            "Tip: if the image is upside-down, set Rotation to 180°"),
-            font=("Segoe UI", 9), bg="#f0f0f0", fg="#888", justify="left")
+            "Tip: if the image is upside-down, set Rotation to 180°\n"
+            "Monitoring: run LibreHardwareMonitor (web server) for CPU temp"),
+            font=(theme.FONT, 9), bg=theme.BG, fg=theme.TEXT_DIM,
+            justify="left")
         info.pack(anchor="w", **pad)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -455,6 +478,7 @@ class LCDApp(tk.Tk):
             self.playlist_list.see(first_new)
             self._playlist_on_select()
             self._set_status(f"Files: {len(self.playlist)}", "#1a6fb0")
+            self._save_config()
 
     def _playlist_on_select(self):
         """Listbox selection -> load that file as 'current' + preview."""
@@ -476,12 +500,14 @@ class LCDApp(tk.Tk):
         for idx in reversed(sel):
             del self.playlist[idx]
             self.playlist_list.delete(idx)
-        self._set_status(f"Playlist: {len(self.playlist)} items", "#1a6fb0")
+        self._set_status(f"Files: {len(self.playlist)}", "#1a6fb0")
+        self._save_config()
 
     def _playlist_clear(self):
         self.playlist.clear()
         self.playlist_list.delete(0, tk.END)
         self._set_status("Playlist cleared", "#888")
+        self._save_config()
 
     def _playlist_move(self, delta: int):
         sel = self.playlist_list.curselection()
@@ -496,6 +522,7 @@ class LCDApp(tk.Tk):
         for p in self.playlist:
             self.playlist_list.insert(tk.END, os.path.basename(p))
         self.playlist_list.selection_set(new)
+        self._save_config()
 
     def _playlist_play_selected(self):
         """Double-click an item: load + play just that one."""
@@ -814,6 +841,8 @@ class LCDApp(tk.Tk):
 
     def _draw_brightness_bar(self):
         """Paint the brightness bar inset with snap-zone margins + ticks."""
+        from usblcd import theme
+
         c = self.bright_canvas
         c.delete("all")
         w = 134
@@ -823,17 +852,17 @@ class LCDApp(tk.Tk):
         val = int(self.bright_var.get())
         fill_w = max(2, int(bar_w * val / 100))
         # Visible bar background (darker, distinct from snap zones)
-        c.create_rectangle(edge, 1, w - edge, h - 1, fill="#d0d0d0", outline="")
+        c.create_rectangle(edge, 1, w - edge, h - 1, fill="#2a2a34", outline="")
         # Fill portion
-        c.create_rectangle(edge, 1, edge + fill_w, h - 1, fill="#4a90d9", outline="")
+        c.create_rectangle(edge, 1, edge + fill_w, h - 1, fill=theme.ACCENT, outline="")
         # Tick marks at 0/25/50/75/100
         for frac in (0, 0.25, 0.5, 0.75, 1.0):
             x = int(edge + bar_w * frac)
-            c.create_line(x, 1, x, h - 1, fill="#555", width=1)
+            c.create_line(x, 1, x, h - 1, fill=theme.BORDER, width=1)
         # Current value label
         text_x = max(edge + 4, edge + fill_w - 14)
         c.create_text(text_x, h // 2, text=str(val),
-                      fill="#fff" if val > 30 else "#333",
+                      fill="#ffffff" if val > 30 else "#9a9aa5",
                       font=("Segoe UI", 8, "bold"))
 
     def _reencode_playing(self, brightness: int):
@@ -958,7 +987,6 @@ class LCDApp(tk.Tk):
             self.frames = [self._apply_brightness_bytes(f, brightness, quality)
                            for f in frames]
         self.delays_ms = delays
-        self.save_btn.config(state="normal")
         return True
 
     @staticmethod
@@ -1121,128 +1149,6 @@ class LCDApp(tk.Tk):
         self.stop_btn.config(state="disabled")
         self.progress.stop()
 
-    def _save_theme(self):
-        """Save the current clip as a .zt theme in the project themes/ dir."""
-        if not self.frames:
-            self._set_status("Load a file first", "#c0392b")
-            return
-
-        # themes/ dir next to the project root (parent of this file)
-        themes_dir = os.path.join(_PROJECT_ROOT_DIR, "themes")
-        os.makedirs(themes_dir, exist_ok=True)
-
-        # Suggest a name from the source file
-        base = ""
-        if self.file_path:
-            base = os.path.splitext(os.path.basename(self.file_path))[0]
-        name = simpledialog.askstring(
-            "Save theme", "Theme name:",
-            initialvalue=base or "theme", parent=self,
-        )
-        if not name:
-            return
-        # Sanitize filename
-        name = re.sub(r'[^A-Za-z0-9_\- ]+', '', name).strip() or "theme"
-
-        fps = int(self.fps_var.get())
-        dest = os.path.join(themes_dir, f"{name}.zt")
-        try:
-            from usblcd.ztfile import frames_to_zt
-
-            width, height, rotate, _, _, scale, brightness = self._parse_settings()
-            data = frames_to_zt(
-                self.frames,
-                name=name,
-                fps=fps,
-                width=width,
-                height=height,
-                rotate=rotate,
-                scale=scale,
-                brightness=brightness,
-            )
-            with open(dest, "wb") as f:
-                f.write(data)
-        except Exception as e:
-            self._set_status(f"Save failed: {e}", "#c0392b")
-            return
-
-        self._set_status(f"Saved: {name}.zt ({len(self.frames)} frames)", "#1a8a3a")
-        self._refresh_themes()
-
-    def _refresh_themes(self):
-        """List .zt files in the themes/ dir."""
-        self.themes_list.delete(0, tk.END)
-        try:
-            entries = sorted(
-                f for f in os.listdir(self._themes_dir) if f.lower().endswith(".zt")
-            )
-        except OSError:
-            entries = []
-        for e in entries:
-            self.themes_list.insert(tk.END, e)
-        if not entries:
-            self.themes_list.insert(tk.END, "(no themes saved yet)")
-
-    def _selected_theme(self) -> str | None:
-        sel = self.themes_list.curselection()
-        if not sel:
-            self._set_status("Select a theme first", "#c0392b")
-            return None
-        name = self.themes_list.get(sel[0])
-        if name.startswith("("):
-            return None
-        return name
-
-    def _load_theme(self):
-        """Load a saved theme from themes/ and play it (settings restored)."""
-        name = self._selected_theme()
-        if not name:
-            return
-        path = os.path.join(self._themes_dir, name)
-        self.file_path = path
-        self.file_label.config(text=name, foreground="#1a1a1a")
-
-        # Parse the .zt header for stored settings, if present
-        meta = None
-        try:
-            from usblcd.ztfile import zt_parse
-
-            with open(path, "rb") as f:
-                data = f.read()
-            meta = zt_parse(data)
-        except Exception:
-            pass
-
-        if meta is not None:
-            # Restore GUI controls to the saved theme's settings
-            self.fps_var.set(str(meta["fps"]))
-            self.rot_var.set(f"{meta['rotate']}°")
-            self.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
-            self.bright_var.set(meta["brightness"])
-            res = f"{meta['width']} x {meta['height']}"
-            if res in RESOLUTIONS:
-                self.res_var.set(res)
-
-        self._load_preview(path)
-        self._set_status(f"Loaded theme: {name} (click Play)", "#1a6fb0")
-        # Auto-play if connected
-        if self.lcd is not None and self.player is None:
-            self._toggle_play()
-
-    def _delete_theme(self):
-        """Delete the selected theme file."""
-        name = self._selected_theme()
-        if not name:
-            return
-        if not messagebox.askyesno("Delete theme", f"Delete '{name}'?", parent=self):
-            return
-        try:
-            os.remove(os.path.join(self._themes_dir, name))
-            self._set_status(f"Deleted: {name}", "#888")
-        except OSError as e:
-            self._set_status(f"Delete failed: {e}", "#c0392b")
-        self._refresh_themes()
-
     def _on_player_error(self, msg):
         self.after(0, lambda: (self._stop_play(),
                                self._set_status(msg, "#c0392b")))
@@ -1254,6 +1160,7 @@ class LCDApp(tk.Tk):
         self.status_label.config(text=text, fg=color)
 
     def _on_close(self):
+        self._save_config()
         self._stop_preview()
         self._stop_play()
         if self.lcd is not None:
@@ -1262,6 +1169,65 @@ class LCDApp(tk.Tk):
             except Exception:
                 pass
         self.destroy()
+
+    # ---------- Config persistence ----------
+
+    CONFIG_PATH = os.path.join(_PROJECT_ROOT_DIR, "config.json")
+
+    def _schedule_config_save(self, *args):
+        """Debounced config save (avoids a write per combobox keystroke)."""
+        if getattr(self, "_cfg_job", None):
+            self.after_cancel(self._cfg_job)
+        self._cfg_job = self.after(500, self._save_config)
+
+    def _save_config(self):
+        """Persist the playlist + display settings (called on change/close)."""
+        import json
+
+        cfg = {
+            "playlist": list(self.playlist),
+            "settings": {
+                "resolution": self.res_var.get(),
+                "rotation": self.rot_var.get(),
+                "quality": self.qual_var.get(),
+                "fps": self.fps_var.get(),
+                "scale": self.scale_var.get(),
+                "brightness": self.bright_var.get(),
+                "loop": self.loop_var.get(),
+                "monitor": self.monitor_var.get(),
+                "overlay_pos": self.overlay_pos_var.get(),
+            },
+        }
+        try:
+            with open(self.CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except OSError:
+            pass
+
+    def _load_config(self):
+        """Restore the playlist + settings saved by a previous run."""
+        import json
+
+        try:
+            with open(self.CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            return
+        s = cfg.get("settings", {})
+        self.res_var.set(s.get("resolution", self.res_var.get()))
+        self.rot_var.set(s.get("rotation", self.rot_var.get()))
+        self.qual_var.set(s.get("quality", self.qual_var.get()))
+        self.fps_var.set(s.get("fps", self.fps_var.get()))
+        self.scale_var.set(s.get("scale", self.scale_var.get()))
+        self.bright_var.set(s.get("brightness", self.bright_var.get()))
+        self.loop_var.set(s.get("loop", self.loop_var.get()))
+        self.monitor_var.set(s.get("monitor", self.monitor_var.get()))
+        self.overlay_pos_var.set(s.get("overlay_pos", self.overlay_pos_var.get()))
+        # Playlist: restore files that still exist
+        for p in cfg.get("playlist", []):
+            if os.path.isfile(p) and p not in self.playlist:
+                self.playlist.append(p)
+                self.playlist_list.insert(tk.END, os.path.basename(p))
 
 
 def main():

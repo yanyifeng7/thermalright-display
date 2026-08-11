@@ -31,5 +31,8 @@ htmlcov/
 # User-saved themes (created at runtime by the GUI)
 themes/
 
+# Per-user config (playlist + settings persist across runs)
+config.json
+
 # Logs
 *.log
