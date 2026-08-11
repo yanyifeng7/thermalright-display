@@ -47,6 +47,23 @@ re-encoded). The overlay updates at most every 2s and only when the
 visible text actually changes (CPU 2 decimals), so cost stays bounded
 while readings feel live.
 
+### Playlist + preload CPU
+
+Playlist mode (multiple GIFs/themes in sequence) uses background
+**preloading** of the next item for zero-pause switching. Measured on a
+5-GIF playlist (2026-08-10):
+
+| Config | CPU | vs TRCC |
+|---|---|---|
+| 5-GIF playlist, preload, no overlay | **0.188 cores (18.8%)** | ~2.2× less |
+| 5-GIF playlist, preload + overlay | **0.305 cores (30.5%)** | ~1.3× less |
+| 5-GIF playlist, sync-load + overlay (no preload) | 0.241 cores | ~1.7× less |
+| TRCC full stack | 0.405 cores (40.5%) | — |
+
+Preload's ~0.06-0.19-core cost is transient (the next item's encode runs
+while the current one plays, then stops). Single-item playback stays at
+the ~0.2%/0.17-core baselines above.
+
 ### Gotchas discovered (hardware-verified)
 1. **Every frame MUST be wrapped in the 64-byte PICTURE header** — raw JPEG gets silently ignored (display shows boot logo)
 2. **Raw .zt JPEG bytes are rejected by the display decoder** — always re-encode through PIL first (TRCC does the same internally)
