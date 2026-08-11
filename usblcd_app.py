@@ -253,13 +253,8 @@ class LCDApp(tk.Tk):
                           bg="#f0f0f0", fg="#1a1a1a")
         header.pack(anchor="w", **pad)
 
-        # File picker
-        file_frame = ttk.Frame(self)
-        file_frame.pack(fill="x", **pad)
-        self.file_label = ttk.Label(file_frame, text="No file selected",
-                                    foreground="#666")
-        self.file_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(file_frame, text="Browse…", command=self._pick_file).pack(side="right")
+        # File picker — consolidated into the Playlist panel below.
+        # (Single-file Browse was redundant with Playlist's Add File….)
 
         # Settings grid
         settings = ttk.LabelFrame(self, text=" Display settings ")
@@ -369,12 +364,14 @@ class LCDApp(tk.Tk):
         os.makedirs(self._themes_dir, exist_ok=True)
         self._refresh_themes()
 
-        # Playlist panel
-        pl_frame = ttk.LabelFrame(self, text=" Playlist ")
+        # Playlist panel — the single file selector (add, preview, play)
+        pl_frame = ttk.LabelFrame(self, text=" Files ")
         pl_frame.pack(fill="x", **pad)
         pl_row = ttk.Frame(pl_frame)
         pl_row.pack(fill="x", padx=8, pady=(6, 0))
-        ttk.Label(pl_row, text="Files play in order:").pack(side="left")
+        self.file_label = ttk.Label(pl_row, text="No file selected",
+                                    foreground="#666")
+        self.file_label.pack(side="left", fill="x", expand=True)
         ttk.Button(pl_row, text="Clear", command=self._playlist_clear,
                    width=8).pack(side="right", padx=2)
         ttk.Button(pl_row, text="Remove", command=self._playlist_remove,
@@ -390,6 +387,7 @@ class LCDApp(tk.Tk):
                                         font=("Segoe UI", 9))
         self.playlist_list.pack(fill="x", padx=8, pady=6)
         self.playlist_list.bind("<Double-Button-1>", lambda e: self._playlist_play_selected())
+        self.playlist_list.bind("<<ListboxSelect>>", lambda e: self._playlist_on_select())
         self.playlist: list[str] = []      # file paths
         self.playlist_idx: int = 0         # current item when playing
         self._preload: tuple | None = None  # (frames, delays, own_zt, meta)
@@ -433,25 +431,7 @@ class LCDApp(tk.Tk):
 
     # ---------- Actions ----------
 
-    def _pick_file(self):
-        path = filedialog.askopenfilename(
-            title="Choose a GIF, theme, or image",
-            filetypes=[
-                ("All supported", "*.gif *.zt *.jpg *.jpeg *.png *.bmp *.webp"),
-                ("Animated GIF", "*.gif"),
-                ("TRCC theme", "*.zt"),
-                ("Images", "*.jpg *.jpeg *.png *.bmp *.webp"),
-            ],
-        )
-        if not path:
-            return
-        self.file_path = path
-        name = path.split("/")[-1].split("\\")[-1]
-        self.file_label.config(text=name, foreground="#1a1a1a")
-        self._set_status(f"Loaded: {name} (click Play)", "#1a6fb0")
-        self._load_preview(path)
-
-    # ---------- Playlist ----------
+    # ---------- Playlist (single file selector) ----------
 
     def _playlist_add(self):
         paths = filedialog.askopenfilenames(
@@ -468,7 +448,28 @@ class LCDApp(tk.Tk):
                 self.playlist.append(p)
                 self.playlist_list.insert(tk.END, os.path.basename(p))
         if paths:
-            self._set_status(f"Playlist: {len(self.playlist)} items", "#1a6fb0")
+            # Select the first newly-added file so the preview shows it
+            self.playlist_list.selection_clear(0, tk.END)
+            first_new = len(self.playlist) - len(paths)
+            self.playlist_list.selection_set(first_new)
+            self.playlist_list.see(first_new)
+            self._playlist_on_select()
+            self._set_status(f"Files: {len(self.playlist)}", "#1a6fb0")
+
+    def _playlist_on_select(self):
+        """Listbox selection -> load that file as 'current' + preview."""
+        sel = self.playlist_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self.playlist):
+            return
+        path = self.playlist[idx]
+        self.file_path = path
+        name = os.path.basename(path)
+        self.file_label.config(text=name, foreground="#1a1a1a")
+        # Show the preview (also loads source frames for Save Theme)
+        self._load_preview(path)
 
     def _playlist_remove(self):
         sel = list(self.playlist_list.curselection())
@@ -497,14 +498,11 @@ class LCDApp(tk.Tk):
         self.playlist_list.selection_set(new)
 
     def _playlist_play_selected(self):
-        """Double-click an item: load + play just that one (normal flow)."""
+        """Double-click an item: load + play just that one."""
         sel = self.playlist_list.curselection()
         if not sel:
             return
-        self.file_path = self.playlist[sel[0]]
-        name = os.path.basename(self.file_path)
-        self.file_label.config(text=name, foreground="#1a1a1a")
-        self._load_preview(self.file_path)
+        self._playlist_on_select()  # sets file_path + label + preview
         if self.lcd is not None and self.player is None:
             self._toggle_play()
 
