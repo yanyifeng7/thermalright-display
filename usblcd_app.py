@@ -628,7 +628,13 @@ class LCDApp(tk.Tk):
             self._stop_play()
 
     def _preload_next(self):
-        """Background-preload the NEXT playlist item (zero-pause switching)."""
+        """Background-preload the NEXT playlist item (zero-pause switching).
+
+        Skipped entirely for single-item playlists — the next item would be
+        the current one, so this would re-encode the same clip forever
+        (~0.25 cores of wasted work, caught via py-spy)."""
+        if len(self.playlist) <= 1:
+            return
         nxt = self.playlist_idx + 1
         if nxt >= len(self.playlist):
             if not self.loop_var.get():
