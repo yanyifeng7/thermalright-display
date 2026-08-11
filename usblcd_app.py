@@ -202,7 +202,12 @@ class MonitorThread(threading.Thread):
                     if r.cpu_temp_c is not None:
                         parts.append(f"{r.cpu_temp_c:.0f}C")
                     parts.append(f"GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c:.0f}C")
-                    self.on_status("Monitor: " + " | ".join(parts))
+                    # Marshal to the tk main thread (widgets aren't thread-safe)
+                    msg = "Monitor: " + " | ".join(parts)
+                    try:
+                        self.app.after(0, lambda m=msg: self.on_status(m, "#1a8a3a"))
+                    except Exception:
+                        pass
             self._stop.wait(0.5)
 
         if self._sensor is not None:
