@@ -183,25 +183,38 @@ class MonitorThread(threading.Thread):
         if rotate:
             block = block.rotate(-rotate, expand=True)
 
-        # Paste position so the block lands at the DISPLAYED corner:
-        # paste corner = displayed corner rotated by -rotate around center
+        # Anchor = desired DISPLAYED corner point, rotated by -rotate
+        # around the frame center (same math as draw_monitor_overlay,
+        # hardware-verified). The block's relevant corner lands on it.
         import math
 
-        corners = {
-            "top-left": (pad, pad),
-            "top-right": (w - block.width - pad, pad),
-            "bottom-left": (pad, h - block.height - pad),
-            "bottom-right": (w - block.width - pad, h - block.height - pad),
-        }
-        dx, dy = corners[position]
-        rad = math.radians(-rotate)
-        cx, cy = w / 2, h / 2
-        ox, oy = dx - cx, dy - cy
-        px = cx + ox * math.cos(rad) - oy * math.sin(rad)
-        py = cy + ox * math.sin(rad) + oy * math.cos(rad)
-        paste = (max(0, min(int(px), w - block.width)),
-                 max(0, min(int(py), h - block.height)))
-        self._sprite = (block, paste)
+        def _rot_point(px, py, angle_deg):
+            rad = math.radians(angle_deg)
+            cx, cy = w / 2.0, h / 2.0
+            dx, dy = px - cx, py - cy
+            return (
+                cx + dx * math.cos(rad) - dy * math.sin(rad),
+                cy + dx * math.sin(rad) + dy * math.cos(rad),
+            )
+
+        if position == "top-right":
+            ax, ay = _rot_point(w - pad, pad, -rotate)
+            pos = (int(ax - block.width), int(ay))
+        elif position == "bottom-left":
+            ax, ay = _rot_point(pad, h - pad, -rotate)
+            pos = (int(ax), int(ay - block.height))
+        elif position == "bottom-right":
+            ax, ay = _rot_point(w - pad, h - pad, -rotate)
+            pos = (int(ax - block.width), int(ay - block.height))
+        else:  # top-left (default)
+            ax, ay = _rot_point(pad, pad, -rotate)
+            pos = (int(ax), int(ay))
+
+        pos = (
+            max(0, min(pos[0], w - block.width)),
+            max(0, min(pos[1], h - block.height)),
+        )
+        self._sprite = (block, pos)
 
     def get_frame(self, i: int, base_frame: bytes) -> bytes:
         """Return the overlaid frame: paste the cached sprite, encode once."""
