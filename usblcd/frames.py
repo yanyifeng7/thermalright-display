@@ -74,6 +74,7 @@ def draw_monitor_overlay(
     gpu_temp_c=None,
     gpu_freq_mhz=None,
     cpu_freq_mhz=None,
+    cpu_temp_c=None,
     rotate: int = 0,
     position: str = "top-left",
 ) -> Image.Image:
@@ -97,6 +98,8 @@ def draw_monitor_overlay(
     lines = []
     if cpu_freq_mhz is not None:
         lines.append(f"CPU {cpu_freq_mhz / 1000:.2f} GHz")
+    if cpu_temp_c is not None:
+        lines.append(f"CPU {cpu_temp_c:.0f} C")
     if gpu_freq_mhz is not None:
         lines.append(f"GPU {gpu_freq_mhz} MHz")
     if gpu_temp_c is not None:

@@ -162,6 +162,7 @@ class MonitorThread(threading.Thread):
             gpu_temp_c=readings.gpu_temp_c,
             gpu_freq_mhz=readings.gpu_freq_mhz,
             cpu_freq_mhz=readings.cpu_freq_mhz,
+            cpu_temp_c=readings.cpu_temp_c,
             rotate=rotate,
             position=position,
         )
@@ -179,9 +180,10 @@ class MonitorThread(threading.Thread):
         while not self._stop.is_set():
             r = sensor.read()
             # Displayed text decides staleness (what the user SEES):
-            # CPU 2 decimals, GPU MHz rounded to 50, GPU temp rounded.
+            # CPU 2 decimals, CPU temp, GPU MHz rounded to 50, GPU temp.
             text = (
                 f"{r.cpu_freq_mhz/1000:.2f}" if r.cpu_freq_mhz else "-",
+                f"{r.cpu_temp_c:.0f}" if r.cpu_temp_c else "-",
                 f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
                 f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
             )
@@ -196,10 +198,11 @@ class MonitorThread(threading.Thread):
                     self._readings = r
                     self._cache.clear()  # all frames stale -> lazy re-encode
                 if self.on_status:
-                    self.on_status(
-                        f"Monitor: CPU {r.cpu_freq_mhz/1000:.2f} GHz"
-                        f" | GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c}C"
-                    )
+                    parts = [f"CPU {r.cpu_freq_mhz/1000:.2f} GHz"]
+                    if r.cpu_temp_c is not None:
+                        parts.append(f"{r.cpu_temp_c:.0f}C")
+                    parts.append(f"GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c:.0f}C")
+                    self.on_status("Monitor: " + " | ".join(parts))
             self._stop.wait(0.5)
 
         if self._sensor is not None:
