@@ -627,6 +627,46 @@ class LCDApp(tk.Tk):
         else:
             self._stop_play()
 
+    def _playlist_advance(self):
+        """Called when the current playlist item finishes its single cycle."""
+        if self.playlist and not self._stop_play_requested:
+            self.playlist_idx += 1
+            if self.playlist_idx >= len(self.playlist):
+                if self.loop_var.get():
+                    self.playlist_idx = 0
+                else:
+                    self._set_status("Playlist finished", "#888")
+                    self._stop_play()
+                    return
+            # Single-item loop (or the next item is the same file we just
+            # played): reuse the loaded frames — reloading + re-brightness
+            # on every cycle would re-encode the clip forever.
+            nxt_path = self.playlist[self.playlist_idx]
+            if nxt_path == self.file_path and self.frames:
+                self._restart_player()
+            else:
+                self._playlist_start_item(self.playlist_idx)
+        else:
+            self._stop_play()
+
+    def _restart_player(self):
+        """Restart playback of the current frames (no reload/re-encode)."""
+        width, height, _, _, _, _, _ = self._parse_settings()
+        self.player = PlayerThread(
+            self.lcd, self.frames, self.delays_ms, width, height,
+            on_error=self._on_player_error, on_loop=self._on_loop,
+            overlay_provider=self.monitor,
+            cycles=1, on_complete=self._playlist_advance,
+        )
+        self.player.start()
+        self.play_btn.config(text="Pause")
+        self.stop_btn.config(state="normal")
+        self._set_status(
+            f"Playing {self.playlist_idx + 1}/{len(self.playlist)}: "
+            f"{self._short_name(self.file_path)}",
+            "#1a8a3a",
+        )
+
     def _preload_next(self):
         """Background-preload the NEXT playlist item (zero-pause switching).
 
