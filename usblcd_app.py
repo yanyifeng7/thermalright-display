@@ -57,7 +57,7 @@ class PlayerThread(threading.Thread):
 
     def __init__(self, lcd: USBLCD, frames: list[bytes], delays_ms: list[int],
                  width: int, height: int, on_error, on_loop,
-                 overlay_provider=None):
+                 overlay_provider=None, cycles=None, on_complete=None):
         super().__init__(daemon=True)
         self.lcd = lcd
         self.frames = frames
@@ -67,6 +67,8 @@ class PlayerThread(threading.Thread):
         self.on_error = on_error
         self.on_loop = on_loop
         self.overlay_provider = overlay_provider  # None = no overlay
+        self.cycles = cycles          # None = loop forever, N = N cycles then done
+        self.on_complete = on_complete
         self._stop = threading.Event()
 
     def stop(self):
@@ -76,6 +78,8 @@ class PlayerThread(threading.Thread):
         n = len(self.frames)
         loop = 0
         while not self._stop.is_set():
+            if self.cycles is not None and loop >= self.cycles:
+                break
             loop += 1
             for i, (frame, delay) in enumerate(zip(self.frames, self.delays_ms)):
                 if self._stop.is_set():
@@ -93,6 +97,8 @@ class PlayerThread(threading.Thread):
                 if remain > 0:
                     self._stop.wait(remain)
             self.on_loop(loop)
+        if self.on_complete is not None and not self._stop.is_set():
+            self.on_complete()
 
 
 class MonitorThread(threading.Thread):
@@ -207,7 +213,7 @@ class LCDApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} — AIO LCD player")
-        self.geometry("640x880")
+        self.geometry("640x1010")
         self.resizable(False, False)
         self.configure(bg="#f0f0f0")
 
@@ -218,6 +224,7 @@ class LCDApp(tk.Tk):
         self.player: PlayerThread | None = None
         self.monitor: MonitorThread | None = None
         self.lcd: USBLCD | None = None
+        self._stop_play_requested = False
 
         self._build_ui()
         self._set_status("Not connected", "#888")
@@ -354,6 +361,30 @@ class LCDApp(tk.Tk):
         os.makedirs(self._themes_dir, exist_ok=True)
         self._refresh_themes()
 
+        # Playlist panel
+        pl_frame = ttk.LabelFrame(self, text=" Playlist ")
+        pl_frame.pack(fill="x", **pad)
+        pl_row = ttk.Frame(pl_frame)
+        pl_row.pack(fill="x", padx=8, pady=(6, 0))
+        ttk.Label(pl_row, text="Files play in order:").pack(side="left")
+        ttk.Button(pl_row, text="Clear", command=self._playlist_clear,
+                   width=8).pack(side="right", padx=2)
+        ttk.Button(pl_row, text="Remove", command=self._playlist_remove,
+                   width=8).pack(side="right", padx=2)
+        ttk.Button(pl_row, text="▲", command=lambda: self._playlist_move(-1),
+                   width=3).pack(side="right", padx=1)
+        ttk.Button(pl_row, text="▼", command=lambda: self._playlist_move(1),
+                   width=3).pack(side="right", padx=1)
+        ttk.Button(pl_row, text="Add File…", command=self._playlist_add,
+                   width=10).pack(side="right", padx=2)
+        self.playlist_list = tk.Listbox(pl_frame, height=4,
+                                        selectmode=tk.EXTENDED,
+                                        font=("Segoe UI", 9))
+        self.playlist_list.pack(fill="x", padx=8, pady=6)
+        self.playlist_list.bind("<Double-Button-1>", lambda e: self._playlist_play_selected())
+        self.playlist: list[str] = []      # file paths
+        self.playlist_idx: int = 0         # current item when playing
+
         # Status
         status_frame = ttk.Frame(self)
         status_frame.pack(fill="x", **pad)
@@ -409,6 +440,121 @@ class LCDApp(tk.Tk):
         self.file_label.config(text=name, foreground="#1a1a1a")
         self._set_status(f"Loaded: {name} (click Play)", "#1a6fb0")
         self._load_preview(path)
+
+    # ---------- Playlist ----------
+
+    def _playlist_add(self):
+        paths = filedialog.askopenfilenames(
+            title="Add to playlist",
+            filetypes=[
+                ("All supported", "*.gif *.zt *.jpg *.jpeg *.png *.bmp *.webp"),
+                ("Animated GIF", "*.gif"),
+                ("TRCC theme", "*.zt"),
+                ("Images", "*.jpg *.jpeg *.png *.bmp *.webp"),
+            ],
+        )
+        for p in paths:
+            if p not in self.playlist:
+                self.playlist.append(p)
+                self.playlist_list.insert(tk.END, os.path.basename(p))
+        if paths:
+            self._set_status(f"Playlist: {len(self.playlist)} items", "#1a6fb0")
+
+    def _playlist_remove(self):
+        sel = list(self.playlist_list.curselection())
+        for idx in reversed(sel):
+            del self.playlist[idx]
+            self.playlist_list.delete(idx)
+        self._set_status(f"Playlist: {len(self.playlist)} items", "#1a6fb0")
+
+    def _playlist_clear(self):
+        self.playlist.clear()
+        self.playlist_list.delete(0, tk.END)
+        self._set_status("Playlist cleared", "#888")
+
+    def _playlist_move(self, delta: int):
+        sel = self.playlist_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        new = idx + delta
+        if new < 0 or new >= len(self.playlist):
+            return
+        self.playlist[idx], self.playlist[new] = self.playlist[new], self.playlist[idx]
+        self.playlist_list.delete(0, tk.END)
+        for p in self.playlist:
+            self.playlist_list.insert(tk.END, os.path.basename(p))
+        self.playlist_list.selection_set(new)
+
+    def _playlist_play_selected(self):
+        """Double-click an item: load + play just that one (normal flow)."""
+        sel = self.playlist_list.curselection()
+        if not sel:
+            return
+        self.file_path = self.playlist[sel[0]]
+        name = os.path.basename(self.file_path)
+        self.file_label.config(text=name, foreground="#1a1a1a")
+        self._load_preview(self.file_path)
+        if self.lcd is not None and self.player is None:
+            self._toggle_play()
+
+    # ---------- Playlist playback ----------
+
+    def _playlist_advance(self):
+        """Called when the current playlist item finishes its single cycle."""
+        if self.playlist and not self._stop_play_requested:
+            self.playlist_idx += 1
+            if self.playlist_idx >= len(self.playlist):
+                if self.loop_var.get():
+                    self.playlist_idx = 0
+                else:
+                    self._set_status("Playlist finished", "#888")
+                    self._stop_play()
+                    return
+            self._playlist_start_item(self.playlist_idx)
+        else:
+            self._stop_play()
+
+    def _playlist_start_item(self, idx: int):
+        """Load + play one playlist item (single cycle, then advance)."""
+        if not self.playlist or idx >= len(self.playlist):
+            return
+        path = self.playlist[idx]
+        self.file_path = path
+        name = os.path.basename(path)
+        self.file_label.config(text=name, foreground="#1a1a1a")
+        self.playlist_list.selection_clear(0, tk.END)
+        self.playlist_list.selection_set(idx)
+        self.playlist_list.see(idx)
+
+        self._set_status(f"Loading {idx + 1}/{len(self.playlist)}: {name}…", "#1a6fb0")
+        self.progress.start()
+        self.update_idletasks()
+        try:
+            ok = self._load_clip()
+        except Exception as e:
+            ok = False
+            self._set_status(f"Load failed: {e}", "#c0392b")
+        self.progress.stop()
+        if not ok:
+            self._advance_after_error()
+            return
+
+        width, height, _, _, _, _, _ = self._parse_settings()
+        self.player = PlayerThread(
+            self.lcd, self.frames, self.delays_ms, width, height,
+            on_error=self._on_player_error, on_loop=self._on_loop,
+            overlay_provider=self.monitor,
+            cycles=1, on_complete=self._playlist_advance,
+        )
+        self.player.start()
+        self.play_btn.config(text="Pause")
+        self.stop_btn.config(state="normal")
+
+    def _advance_after_error(self):
+        """Skip a broken playlist item after a short pause."""
+        self._set_status("Skipping item…", "#c0392b")
+        self.after(800, self._playlist_advance)
 
     # ---------- Preview ----------
 
@@ -829,6 +975,22 @@ class LCDApp(tk.Tk):
             self._set_status("Connect first", "#c0392b")
             return
 
+        # Playlist mode: play items in order, one cycle each
+        if self.playlist:
+            self._stop_play_requested = False
+            self.playlist_idx = 0
+            # Recreate the monitor (bound to current frame list)
+            self.monitor = None
+            if self.monitor_var.get():
+                width, height, _, _, _, _, _ = self._parse_settings()
+                self.monitor = MonitorThread(
+                    self, self.frames, self.delays_ms, width, height,
+                    on_status=self._set_status,
+                )
+                self.monitor.start()
+            self._playlist_start_item(0)
+            return
+
         self._set_status("Loading frames…", "#1a6fb0")
         self.progress.start()
         self.update_idletasks()
@@ -864,6 +1026,7 @@ class LCDApp(tk.Tk):
         self._set_status(f"Playing: {n} frames, ~{total // n} KB/frame", "#1a8a3a")
 
     def _stop_play(self):
+        self._stop_play_requested = True
         if self.monitor is not None:
             self.monitor.stop()
             self.monitor.join(timeout=2)
