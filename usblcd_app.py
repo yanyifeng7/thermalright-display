@@ -675,7 +675,10 @@ class LCDApp(tk.Tk):
         if pre is not None:
             frames, delays, own_zt, meta = pre
         else:
-            self._set_status(f"Loading {idx + 1}/{len(self.playlist)}: {name}…", "#1a6fb0")
+            self._set_status(
+                f"Loading {idx + 1}/{len(self.playlist)}: {self._short_name(path)}…",
+                "#1a6fb0",
+            )
             self.progress.start()
             self.update_idletasks()
             try:
@@ -712,7 +715,10 @@ class LCDApp(tk.Tk):
         self.player.start()
         self.play_btn.config(text="Pause")
         self.stop_btn.config(state="normal")
-        self._set_status(f"Playing {idx + 1}/{len(self.playlist)}: {name}", "#1a8a3a")
+        self._set_status(
+            f"Playing {idx + 1}/{len(self.playlist)}: {self._short_name(path)}",
+            "#1a8a3a",
+        )
         # Kick off preload of the following item while this one plays
         self._preload_next()
 
