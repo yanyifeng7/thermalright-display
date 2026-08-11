@@ -421,6 +421,9 @@ class LCDApp(tk.Tk):
         for var in (self.res_var, self.rot_var, self.scale_var):
             var.trace_add("write", lambda *a: self._refresh_preview())
         self.bright_var.trace_add("write", lambda *a: self._on_brightness())
+        # Brightness change -> rebuild clip cache at new brightness (debounced
+        # in _on_brightness_cache so slider drags don't fire a rebuild/tick)
+        self.bright_var.trace_add("write", self._on_brightness_cache)
         # Persist settings changes (debounced) so they survive restarts
         for var in (self.res_var, self.rot_var, self.qual_var,
                     self.scale_var, self.bright_var, self.loop_var,
@@ -481,7 +484,9 @@ class LCDApp(tk.Tk):
         self.playlist_list.bind("<<ListboxSelect>>", lambda e: self._playlist_on_select())
         self.playlist: list[str] = []      # file paths
         self.playlist_idx: int = 0         # current item when playing
-        self._preload: tuple | None = None  # (frames, delays, own_zt, meta)
+        self._clip_cache: dict[str, tuple] = {}  # path -> (frames, delays, own_zt, meta)
+        self._cache_brightness: int | None = None  # brightness of cached frames
+        self._preload: tuple | None = None  # (legacy)
         self._preload_lock = threading.Lock()
 
         # Status
@@ -550,6 +555,7 @@ class LCDApp(tk.Tk):
             self._playlist_on_select()
             self._set_status(f"Files: {len(self.playlist)}", "#1a6fb0")
             self._save_config()
+            self._load_all_clips()
 
     def _playlist_on_select(self):
         """Listbox selection -> load that file as 'current' + preview."""
@@ -575,13 +581,15 @@ class LCDApp(tk.Tk):
     def _playlist_remove(self):
         sel = list(self.playlist_list.curselection())
         for idx in reversed(sel):
-            del self.playlist[idx]
+            removed = self.playlist.pop(idx)
+            self._clip_cache.pop(removed, None)
             self.playlist_list.delete(idx)
         self._set_status(f"Files: {len(self.playlist)}", "#1a6fb0")
         self._save_config()
 
     def _playlist_clear(self):
         self.playlist.clear()
+        self._clip_cache.clear()
         self.playlist_list.delete(0, tk.END)
         self._set_status("Playlist cleared", "#888")
         self._save_config()
@@ -667,42 +675,82 @@ class LCDApp(tk.Tk):
             "#1a8a3a",
         )
 
-    def _preload_next(self):
-        """Background-preload the NEXT playlist item (zero-pause switching).
+    # ---------- Clip cache (load-all-at-once) ----------
 
-        Skipped entirely for single-item playlists — the next item would be
-        the current one, so this would re-encode the same clip forever
-        (~0.25 cores of wasted work, caught via py-spy)."""
-        if len(self.playlist) <= 1:
-            return
-        nxt = self.playlist_idx + 1
-        if nxt >= len(self.playlist):
-            if not self.loop_var.get():
-                return
-            nxt = 0
-        path = self.playlist[nxt]
+    def _load_all_clips(self, brightness=None):
+        """Background-load every playlist item into _clip_cache.
+
+        All clips are encoded once at the CURRENT brightness and held in
+        RAM (~15MB/clip typical — cheap on 32GB). Switching between items
+        is an instant cache lookup: no preload thread, no per-switch
+        encode, zero-pause playback with zero background CPU.
+
+        If `brightness` is given (or differs from the cached brightness),
+        the cache is rebuilt at that brightness — used when the user
+        changes the brightness slider (debounced).
+        """
+        if brightness is None:
+            brightness = int(self.bright_var.get())
+        with self._preload_lock:
+            if self._cache_brightness == brightness and self._clip_cache:
+                return  # cache already matches
+            self._cache_brightness = brightness
+            self._clip_cache.clear()
+            paths = list(self.playlist)
+
         width, height, rotate, quality, fps, scale, _ = self._parse_settings()
         target = (width, height)
 
         def worker():
-            try:
-                frames, delays, own_zt, meta = self._load_clip_frames(
-                    path, target, rotate, quality, scale, fps
-                )
-                with self._preload_lock:
-                    self._preload = (frames, delays, own_zt, meta)
-            except Exception:
-                with self._preload_lock:
-                    self._preload = None
+            for i, path in enumerate(paths):
+                if path in self._clip_cache:
+                    continue
+                try:
+                    frames, delays, own_zt, meta = self._load_clip_frames(
+                        path, target, rotate, quality, scale, fps
+                    )
+                    # Cache BRIGHTNESS-APPLIED frames so a playlist switch
+                    # is a pure lookup (no per-switch re-encode).
+                    if not own_zt:
+                        frames = [
+                            self._apply_brightness_bytes(f, brightness, quality)
+                            for f in frames
+                        ]
+                    self._clip_cache[path] = (frames, delays, own_zt, meta)
+                    if i == 0 and not self.file_path:
+                        # First clip becomes the selected file for preview
+                        self.after(0, lambda p=path: self._playlist_on_select(p))
+                except Exception:
+                    pass
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _consume_preload(self):
-        """Take the ready preload (if any), clearing it atomically."""
+    def _clip_from_cache(self, path: str):
+        """Return cached frames for path (cached at current brightness,
+        already brightness-applied), or load + cache on demand."""
         with self._preload_lock:
-            p = self._preload
-            self._preload = None
-        return p
+            if path in self._clip_cache:
+                return self._clip_cache[path]
+        width, height, rotate, quality, fps, scale, brightness = self._parse_settings()
+        frames, delays, own_zt, meta = self._load_clip_frames(
+            path, (width, height), rotate, quality, scale, fps
+        )
+        if not own_zt:
+            frames = [
+                self._apply_brightness_bytes(f, brightness, quality)
+                for f in frames
+            ]
+        with self._preload_lock:
+            self._clip_cache[path] = (frames, delays, own_zt, meta)
+        return frames, delays, own_zt, meta
+
+    def _on_brightness_cache(self, *args):
+        """Rebuild the clip cache at the new brightness (debounced so
+        slider drags don't fire a rebuild per tick)."""
+        job = getattr(self, "_brightness_cache_job", None)
+        if job:
+            self.after_cancel(job)
+        self._brightness_cache_job = self.after(800, self._load_all_clips)
 
     def _playlist_start_item(self, idx: int):
         """Load + play one playlist item (single cycle, then advance)."""
@@ -715,27 +763,12 @@ class LCDApp(tk.Tk):
         self.playlist_list.selection_set(idx)
         self.playlist_list.see(idx)
 
-        # Use a ready preload for zero-pause switching; else load now
-        pre = self._consume_preload()
+        # Use the all-clips cache for instant switching; fall back to a
+        # synchronous load if the cache is empty (first play before load).
+        frames, delays, own_zt, meta = self._clip_from_cache(path)
         width, height, rotate, quality, fps, scale, brightness = self._parse_settings()
-        if pre is not None:
-            frames, delays, own_zt, meta = pre
-        else:
-            self._set_status(
-                f"Loading {idx + 1}/{len(self.playlist)}: {self._short_name(path)}…",
-                "#1a6fb0",
-            )
-            self.progress.start()
-            self.update_idletasks()
-            try:
-                frames, delays, own_zt, meta = self._load_clip_frames(
-                    path, (width, height), rotate, quality, scale, fps
-                )
-            except Exception as e:
-                frames = []
-                self._set_status(f"Load failed: {e}", "#c0392b")
-            self.progress.stop()
         if not frames:
+            self._set_status(f"Load failed: {self._short_name(path)}", "#c0392b")
             self._advance_after_error()
             return
 
@@ -744,12 +777,10 @@ class LCDApp(tk.Tk):
         # Overlay cache is keyed by frame index — stale across items
         if self.monitor is not None:
             self.monitor.invalidate()
+        # Cached frames are ALREADY brightness-applied (see _load_all_clips) —
+        # a playlist switch is a pure lookup, zero re-encode.
         self._source_frames = list(frames)
-        if own_zt:
-            self.frames = list(frames)
-        else:
-            self.frames = [self._apply_brightness_bytes(f, brightness, quality)
-                           for f in frames]
+        self.frames = list(frames)
         self.delays_ms = delays
 
         self.player = PlayerThread(
@@ -765,8 +796,7 @@ class LCDApp(tk.Tk):
             f"Playing {idx + 1}/{len(self.playlist)}: {self._short_name(path)}",
             "#1a8a3a",
         )
-        # Kick off preload of the following item while this one plays
-        self._preload_next()
+        # Next item is served from the all-clips cache — nothing to preload
 
     def _advance_after_error(self):
         """Skip a broken playlist item after a short pause."""
@@ -1356,6 +1386,8 @@ class LCDApp(tk.Tk):
             if os.path.isfile(p) and p not in self.playlist:
                 self.playlist.append(p)
                 self.playlist_list.insert(tk.END, os.path.basename(p))
+        if self.playlist:
+            self._load_all_clips()
 
 
 def main():
