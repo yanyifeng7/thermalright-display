@@ -57,81 +57,116 @@ class SensorMonitor:
             self._nvml_failed = True
             return False
 
-    # ---------- LibreHardwareMonitor (CPU temp + real freq) ----------
+    # ---------- LibreHardwareMonitor (single source for CPU+GPU) ----------
 
-    def _read_cpu_lhm(self) -> tuple[float | None, float | None]:
-        """Fetch CPU temp (Tctl/Tdie) and REAL current clock from LHM.
+    def _read_lhm(self) -> SensorReadings:
+        """Fetch CPU temp/freq + GPU temp/freq from LHM's web server.
 
-        psutil.cpu_freq() on Windows is stuck at the max turbo (4700 MHz)
-        — Windows doesn't expose per-core clocks that way. LHM reads the
-        SMU directly and reports live clocks (e.g. 5216 MHz boosting,
-        713 MHz effective idle). One HTTP GET gets both values.
+        LHM's kernel driver reads the SMU (CPU) and NVIDIA NVML (GPU)
+        directly — one HTTP GET replaces three separate sensor APIs and
+        gives REAL live clocks (psutil.cpu_freq() is stuck at max turbo
+        on Windows; NVML works but adds a dependency).
 
-        Returns (temp_c, freq_mhz); None entries when LHM isn't running.
+        Returns a partial SensorReadings (None entries when LHM isn't
+        running — caller falls back to NVML/psutil).
         """
         import json as _json
         import urllib.request
 
+        r = SensorReadings()
         try:
             with urllib.request.urlopen(self._lhm_url, timeout=2) as resp:
                 data = _json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:
-            return None, None
+            return r
         temps = []
         freqs = []
+        gpu_temps = []
+        gpu_freqs = []
+        # Which subtree we're under: CPU vs GPU hardware node
+        in_gpu = False
+        gpu_nodes = ("RTX 5070", "NVIDIA GeForce", "NVIDIA")
 
-        def walk(node):
+        def walk(node, gpu: bool):
             name = node.get("Text", "")
             val = node.get("Value", "")
-            if "Tctl" in name or "Tdie" in name:
-                try:
-                    temps.append(float(val.split()[0]))
-                except (ValueError, IndexError):
-                    pass
-            elif name == "Cores (Average)" and "MHz" in val:
-                try:
-                    freqs.append(float(val.split()[0]))
-                except (ValueError, IndexError):
-                    pass
+            hw = node.get("HardwareType", "")
+            if gpu or any(g in name for g in gpu_nodes):
+                gpu = True
+            if gpu:
+                if name == "GPU Core" and "°C" in val:
+                    try:
+                        gpu_temps.append(float(val.split()[0]))
+                    except (ValueError, IndexError):
+                        pass
+                elif name == "GPU Core" and "MHz" in val:
+                    try:
+                        gpu_freqs.append(float(val.split()[0]))
+                    except (ValueError, IndexError):
+                        pass
+            else:
+                if "Tctl" in name or "Tdie" in name:
+                    try:
+                        temps.append(float(val.split()[0]))
+                    except (ValueError, IndexError):
+                        pass
+                elif name == "Cores (Average)" and "MHz" in val:
+                    try:
+                        freqs.append(float(val.split()[0]))
+                    except (ValueError, IndexError):
+                        pass
             for c in node.get("Children", []):
-                walk(c)
+                walk(c, gpu)
 
-        walk(data)
-        temp = max(temps) if temps else None  # Tctl (hottest) if both present
-        freq = max(freqs) if freqs else None
-        return temp, freq
+        walk(data, False)
+        if temps:
+            r.cpu_temp_c = max(temps)  # Tctl (hottest) if both present
+        if freqs:
+            r.cpu_freq_mhz = max(freqs)
+        if gpu_temps:
+            r.gpu_temp_c = max(gpu_temps)
+        if gpu_freqs:
+            r.gpu_freq_mhz = int(max(gpu_freqs))
+        return r
 
     def read(self) -> SensorReadings:
         r = SensorReadings()
+
+        # LHM is the single source when running: real CPU temp/freq + GPU
+        # temp/freq in one HTTP GET (SMU + NVML behind LHM's driver).
+        lhm = self._read_lhm()
+        r.cpu_temp_c = lhm.cpu_temp_c
+        r.cpu_freq_mhz = lhm.cpu_freq_mhz
+        r.gpu_temp_c = lhm.gpu_temp_c
+        r.gpu_freq_mhz = lhm.gpu_freq_mhz
+
+        # Fallbacks when LHM isn't running (or misses a sensor)
         with self._lock:
             try:
-                if self._init_nvml():
-                    nv = self._nvml
-                    h = self._nvml_handle
-                    r.gpu_temp_c = nv.nvmlDeviceGetTemperature(
-                        h, nv.NVML_TEMPERATURE_GPU
-                    )
-                    r.gpu_freq_mhz = nv.nvmlDeviceGetClockInfo(
-                        h, nv.NVML_CLOCK_GRAPHICS
-                    )
+                if r.gpu_temp_c is None or r.gpu_freq_mhz is None:
+                    if self._init_nvml():
+                        nv = self._nvml
+                        h = self._nvml_handle
+                        if r.gpu_temp_c is None:
+                            r.gpu_temp_c = nv.nvmlDeviceGetTemperature(
+                                h, nv.NVML_TEMPERATURE_GPU
+                            )
+                        if r.gpu_freq_mhz is None:
+                            r.gpu_freq_mhz = nv.nvmlDeviceGetClockInfo(
+                                h, nv.NVML_CLOCK_GRAPHICS
+                            )
             except Exception:
                 pass
 
             try:
-                import psutil
+                if r.cpu_freq_mhz is None:
+                    import psutil
 
-                f = psutil.cpu_freq()
-                if f:
-                    r.cpu_freq_mhz = f.current
+                    f = psutil.cpu_freq()
+                    if f:
+                        r.cpu_freq_mhz = f.current
             except Exception:
                 pass
-
-            # LHM gives REAL CPU temp + live clock (psutil's is stuck at
-            # max turbo on Windows). Prefer LHM for both.
-            lhm_temp, lhm_freq = self._read_cpu_lhm()
-            r.cpu_temp_c = lhm_temp
-            if lhm_freq is not None:
-                r.cpu_freq_mhz = lhm_freq
 
             r.ok = any(
                 v is not None
