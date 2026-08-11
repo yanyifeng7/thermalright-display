@@ -11,7 +11,8 @@
 
 That's it. On first run the launcher:
 - creates a virtual environment (`.venv`) inside the project folder,
-- installs the dependencies automatically (`pyusb`, `Pillow`, `libusb`),
+- installs the dependencies automatically (`pyusb`, `Pillow`, `libusb`,
+  `nvidia-ml-py`, `psutil`),
 - opens the GUI.
 
 All future launches are instant — just double-click again.
@@ -23,15 +24,35 @@ All future launches are instant — just double-click again.
 
 | Control | Purpose |
 |---|---|
-| **Browse…** | pick a GIF, .zt theme, or image |
+| **Files → Add File…** | add GIFs/themes/images to the list (playlist) |
+| **Files list** | click to preview, double-click to play that one, Play runs the sequence |
 | **Resolution** | panel resolution (default 1600×720 for Thermalright Rainbow) |
 | **Rotation** | 0/90/180/270 — use **180°** if your panel is mounted upside-down |
 | **Scale** | Fit (letterbox) / Fill (crop) / Stretch (fill screen) |
 | **Brightness** | click the bar (0-100, click outside the ends for 0/100) |
 | **Frame rate** | 5-60 fps — only affects `.zt` themes (GIFs use their own timing) |
+| **Monitor overlay** | draw live CPU/GPU temp + freq on the animation (see below) |
 | **Connect / Play / Stop** | obvious 🙂 |
 | **Save Theme…** | saves current clip + settings into `themes/` |
 | **My Themes** | one-click load/delete of saved themes |
+
+## Optional: live CPU/GPU monitoring (LibreHardwareMonitor)
+
+The **Monitor overlay** checkbox shows live readings on the display. GPU
+temp/freq work out of the box (NVML); **CPU temp + real CPU freq need
+LibreHardwareMonitor** running in the background:
+
+1. Download [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases) (v0.9.6+)
+2. Run `LibreHardwareMonitor.exe` — approve the UAC prompt (it installs a
+   kernel driver, same as HWiNFO/Gigabyte Control Centre do)
+3. **Options → Remote Web Server → Run**
+4. **Options → Show Hidden Sensors** (required — the CPU temperature group
+   is hidden by default and won't appear in the web JSON otherwise)
+
+Why: Windows exposes only a frozen ACPI thermal stub on AMD X870E boards;
+LHM's driver reads the real SMU sensor. Without LHM the overlay simply omits
+the CPU temp line (GPU readings still work). LHM costs ~123 MB RAM / ~0.02
+cores.
 
 ## Manual setup (if you prefer the command line)
 

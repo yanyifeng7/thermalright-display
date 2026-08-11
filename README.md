@@ -11,7 +11,39 @@ Verified end-to-end on a **Thermalright Rainbow** AIO (panel is a Somore "USBDIS
 - Orientation control ✅ (panel mounts upside-down in some AIOs — use `--rotate 180`)
 - Brightness ✅ (0-100, software overlay — same method TRCC uses)
 - Theme save/load ✅ (settings persisted: rotation, scale, brightness, fps)
-- Live monitor overlay ✅ (GPU temp/freq + CPU freq drawn on the animation, 4 corner positions, rotates with the frame)
+- Live monitor overlay ✅ (CPU temp/freq + GPU temp/freq drawn on the animation, 4 corner positions, rotates with the frame)
+
+## Live monitoring overlay
+
+The GUI can draw live sensor readings on top of the animation:
+
+```
+CPU 4.98 GHz | CPU 43C | GPU 920 MHz | GPU 41C
+```
+
+| Sensor | Source | Requires |
+|---|---|---|
+| CPU temp (Tctl) | **LibreHardwareMonitor** web server (`localhost:8085`) | LHM running |
+| CPU freq (real, live) | **LibreHardwareMonitor** (psutil falls back to max-turbo only) | LHM running |
+| GPU temp | LibreHardwareMonitor / NVML | — |
+| GPU freq | LibreHardwareMonitor / NVML | — |
+
+**Why LibreHardwareMonitor for CPU temp:** Windows user-mode WMI only exposes
+the ACPI thermal zone, which on AMD X870E boards is a **frozen stub** (~17°C,
+never moves). LHM's kernel driver reads the real **AMD SMU** sensor (Tctl/Tdie
+~40°C at idle, matching BIOS/HWiNFO). It also gives **real live CPU clocks**
+(5.0-5.2 GHz boosting) — `psutil.cpu_freq()` is stuck at the max turbo
+(4.70 GHz) on Windows.
+
+**Setup (one-time):**
+1. Download [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases) (v0.9.6+)
+2. Run `LibreHardwareMonitor.exe` (approve the UAC prompt — it installs a kernel driver)
+3. **Options → Remote Web Server → Run**
+4. **Options → Show Hidden Sensors** (the CPU temperature group is hidden by default and won't export to the JSON otherwise)
+
+That's it — the overlay picks up CPU temp/freq automatically when LHM is
+running, and degrades gracefully (CPU temp line disappears) when it isn't.
+LHM costs ~123 MB RAM and ~0.02 cores idle.
 
 ## Performance: ~190× lighter than TRCC
 
