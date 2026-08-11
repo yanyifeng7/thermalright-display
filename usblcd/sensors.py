@@ -57,14 +57,17 @@ class SensorMonitor:
             self._nvml_failed = True
             return False
 
-    # ---------- LibreHardwareMonitor (CPU temp) ----------
+    # ---------- LibreHardwareMonitor (CPU temp + real freq) ----------
 
-    def _read_cpu_temp_lhm(self) -> float | None:
-        """Fetch CPU temp (Tctl/Tdie) from LHM's web server, if running.
+    def _read_cpu_lhm(self) -> tuple[float | None, float | None]:
+        """Fetch CPU temp (Tctl/Tdie) and REAL current clock from LHM.
 
-        Cheap (~1-3ms HTTP GET on localhost) and zero-driver from our side
-        — LHM's own kernel driver does the SMU read. Returns None when LHM
-        isn't running (caller just omits the reading).
+        psutil.cpu_freq() on Windows is stuck at the max turbo (4700 MHz)
+        — Windows doesn't expose per-core clocks that way. LHM reads the
+        SMU directly and reports live clocks (e.g. 5216 MHz boosting,
+        713 MHz effective idle). One HTTP GET gets both values.
+
+        Returns (temp_c, freq_mhz); None entries when LHM isn't running.
         """
         import json as _json
         import urllib.request
@@ -73,9 +76,9 @@ class SensorMonitor:
             with urllib.request.urlopen(self._lhm_url, timeout=2) as resp:
                 data = _json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:
-            return None
-        # Find Core (Tctl/Tdie) under the CPU hardware node
+            return None, None
         temps = []
+        freqs = []
 
         def walk(node):
             name = node.get("Text", "")
@@ -85,11 +88,18 @@ class SensorMonitor:
                     temps.append(float(val.split()[0]))
                 except (ValueError, IndexError):
                     pass
+            elif name == "Cores (Average)" and "MHz" in val:
+                try:
+                    freqs.append(float(val.split()[0]))
+                except (ValueError, IndexError):
+                    pass
             for c in node.get("Children", []):
                 walk(c)
 
         walk(data)
-        return max(temps) if temps else None  # Tctl (hottest) if both present
+        temp = max(temps) if temps else None  # Tctl (hottest) if both present
+        freq = max(freqs) if freqs else None
+        return temp, freq
 
     def read(self) -> SensorReadings:
         r = SensorReadings()
@@ -116,7 +126,12 @@ class SensorMonitor:
             except Exception:
                 pass
 
-            r.cpu_temp_c = self._read_cpu_temp_lhm()
+            # LHM gives REAL CPU temp + live clock (psutil's is stuck at
+            # max turbo on Windows). Prefer LHM for both.
+            lhm_temp, lhm_freq = self._read_cpu_lhm()
+            r.cpu_temp_c = lhm_temp
+            if lhm_freq is not None:
+                r.cpu_freq_mhz = lhm_freq
 
             r.ok = any(
                 v is not None
