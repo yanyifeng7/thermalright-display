@@ -384,6 +384,8 @@ class LCDApp(tk.Tk):
         self.playlist_list.bind("<Double-Button-1>", lambda e: self._playlist_play_selected())
         self.playlist: list[str] = []      # file paths
         self.playlist_idx: int = 0         # current item when playing
+        self._preload: tuple | None = None  # (frames, delays, own_zt, meta)
+        self._preload_lock = threading.Lock()
 
         # Status
         status_frame = ttk.Frame(self)
@@ -515,6 +517,37 @@ class LCDApp(tk.Tk):
         else:
             self._stop_play()
 
+    def _preload_next(self):
+        """Background-preload the NEXT playlist item (zero-pause switching)."""
+        nxt = self.playlist_idx + 1
+        if nxt >= len(self.playlist):
+            if not self.loop_var.get():
+                return
+            nxt = 0
+        path = self.playlist[nxt]
+        width, height, rotate, quality, fps, scale, _ = self._parse_settings()
+        target = (width, height)
+
+        def worker():
+            try:
+                frames, delays, own_zt, meta = self._load_clip_frames(
+                    path, target, rotate, quality, scale, fps
+                )
+                with self._preload_lock:
+                    self._preload = (frames, delays, own_zt, meta)
+            except Exception:
+                with self._preload_lock:
+                    self._preload = None
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _consume_preload(self):
+        """Take the ready preload (if any), clearing it atomically."""
+        with self._preload_lock:
+            p = self._preload
+            self._preload = None
+        return p
+
     def _playlist_start_item(self, idx: int):
         """Load + play one playlist item (single cycle, then advance)."""
         if not self.playlist or idx >= len(self.playlist):
@@ -527,20 +560,40 @@ class LCDApp(tk.Tk):
         self.playlist_list.selection_set(idx)
         self.playlist_list.see(idx)
 
-        self._set_status(f"Loading {idx + 1}/{len(self.playlist)}: {name}…", "#1a6fb0")
-        self.progress.start()
-        self.update_idletasks()
-        try:
-            ok = self._load_clip()
-        except Exception as e:
-            ok = False
-            self._set_status(f"Load failed: {e}", "#c0392b")
-        self.progress.stop()
-        if not ok:
+        # Use a ready preload for zero-pause switching; else load now
+        pre = self._consume_preload()
+        width, height, rotate, quality, fps, scale, brightness = self._parse_settings()
+        if pre is not None:
+            frames, delays, own_zt, meta = pre
+        else:
+            self._set_status(f"Loading {idx + 1}/{len(self.playlist)}: {name}…", "#1a6fb0")
+            self.progress.start()
+            self.update_idletasks()
+            try:
+                frames, delays, own_zt, meta = self._load_clip_frames(
+                    path, (width, height), rotate, quality, scale, fps
+                )
+            except Exception as e:
+                frames = []
+                self._set_status(f"Load failed: {e}", "#c0392b")
+            self.progress.stop()
+        if not frames:
             self._advance_after_error()
             return
 
-        width, height, _, _, _, _, _ = self._parse_settings()
+        if meta is not None:
+            self._apply_zt_meta(self, meta)
+        # Overlay cache is keyed by frame index — stale across items
+        if self.monitor is not None:
+            self.monitor.invalidate()
+        self._source_frames = list(frames)
+        if own_zt:
+            self.frames = list(frames)
+        else:
+            self.frames = [self._apply_brightness_bytes(f, brightness, quality)
+                           for f in frames]
+        self.delays_ms = delays
+
         self.player = PlayerThread(
             self.lcd, self.frames, self.delays_ms, width, height,
             on_error=self._on_player_error, on_loop=self._on_loop,
@@ -550,6 +603,9 @@ class LCDApp(tk.Tk):
         self.player.start()
         self.play_btn.config(text="Pause")
         self.stop_btn.config(state="normal")
+        self._set_status(f"Playing {idx + 1}/{len(self.playlist)}: {name}", "#1a8a3a")
+        # Kick off preload of the following item while this one plays
+        self._preload_next()
 
     def _advance_after_error(self):
         """Skip a broken playlist item after a short pause."""
@@ -797,39 +853,29 @@ class LCDApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _load_clip(self):
-        """Load + pre-encode frames from the selected file."""
-        if not self.file_path:
-            return False
-        width, height, rotate, quality, fps, scale, brightness = self._parse_settings()
-        target = (width, height)
-        path = self.file_path
-        low = path.lower()
+    @staticmethod
+    def _load_clip_frames(path, target, rotate, quality, scale, fps):
+        """Pure frame loader — NO UI access, safe for background threads.
 
+        Returns (frames, delays, own_zt, meta) where meta is the settings
+        dict from an own-format .zt (None otherwise) that the caller must
+        apply to the UI on the main thread.
+        """
+        from usblcd.ztfile import zt_parse, zt_to_frames
+
+        low = path.lower()
         frames, delays = [], []
         own_zt = False
+        meta = None
         if low.endswith(".zt"):
             with open(path, "rb") as f:
                 data = f.read()
-            from usblcd.ztfile import zt_parse, zt_to_frames
-
             meta = zt_parse(data)
             if meta is not None:
-                # Our own theme: frames are FINAL (settings baked into pixels).
-                # Use them directly; restore any settings not already set.
                 own_zt = True
-                self.fps_var.set(str(meta["fps"]))
-                self.rot_var.set(f"{meta['rotate']}°")
-                self.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
-                self.bright_var.set(meta["brightness"])
-                res = f"{meta['width']} x {meta['height']}"
-                if res in RESOLUTIONS:
-                    self.res_var.set(res)
                 frames = zt_to_frames(data)
                 delays = [int(1000 / meta["fps"])] * len(frames)
             else:
-                # TRCC-style .zt: raw JPEGs need re-encoding + current settings.
-                # Encode at brightness=100 (pre-brightness source).
                 pos = 0
                 while True:
                     idx = data.find(b"\xFF\xD8", pos)
@@ -839,29 +885,54 @@ class LCDApp(tk.Tk):
                     if eoi < 0:
                         break
                     img = Image.open(io.BytesIO(data[idx : eoi + 2])).convert("RGB")
-                    frames.append(self._encode(img, target, rotate, quality, scale, 100))
+                    frames.append(LCDApp._encode(img, target, rotate, quality, scale, 100))
                     delays.append(int(1000 / fps))
                     pos = eoi + 2
         elif low.endswith(".gif"):
             src = Image.open(path)
             for frame in ImageSequence.Iterator(src):
                 rgb = frame.convert("RGB")
-                canvas = self._scale(rgb, target, scale)
+                canvas = LCDApp._scale(rgb, target, scale)
                 if rotate:
                     canvas = canvas.rotate(-rotate, expand=True)
-                    canvas = self._scale(canvas, target, scale)
-                # brightness=100: _source_frames stay pre-brightness
-                frames.append(self._encode(canvas, target, 0, quality, scale, 100))
+                    canvas = LCDApp._scale(canvas, target, scale)
+                frames.append(LCDApp._encode(canvas, target, 0, quality, scale, 100))
                 d = frame.info.get("duration", 0)
                 delays.append(max(10, int(d)) if d else 100)
         else:  # static image
             img = Image.open(path).convert("RGB")
-            img = self._scale(img, target, scale)
+            img = LCDApp._scale(img, target, scale)
             if rotate:
                 img = img.rotate(-rotate, expand=True)
-                img = self._scale(img, target, scale)
-            frames.append(self._encode(img, target, 0, quality, scale, 100))
+                img = LCDApp._scale(img, target, scale)
+            frames.append(LCDApp._encode(img, target, 0, quality, scale, 100))
             delays.append(1000)
+        return frames, delays, own_zt, meta
+
+    @staticmethod
+    def _apply_zt_meta(app, meta):
+        """Restore GUI controls from an own-format .zt header (main thread)."""
+        if meta is None:
+            return
+        app.fps_var.set(str(meta["fps"]))
+        app.rot_var.set(f"{meta['rotate']}°")
+        app.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
+        app.bright_var.set(meta["brightness"])
+        res = f"{meta['width']} x {meta['height']}"
+        if res in RESOLUTIONS:
+            app.res_var.set(res)
+
+    def _load_clip(self):
+        """Load + pre-encode frames from the selected file (main thread)."""
+        if not self.file_path:
+            return False
+        width, height, rotate, quality, fps, scale, brightness = self._parse_settings()
+        target = (width, height)
+        frames, delays, own_zt, meta = self._load_clip_frames(
+            self.file_path, target, rotate, quality, scale, fps
+        )
+        if meta is not None:
+            self._apply_zt_meta(self, meta)
 
         if not frames:
             return False
