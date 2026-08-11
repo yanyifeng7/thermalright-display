@@ -752,6 +752,11 @@ class LCDApp(tk.Tk):
         total = self._preview_total
         if total < 2:
             return
+        # Don't animate the preview while the same content plays on the
+        # AIO — it's redundant and costs ~0.09 cores of CPU.
+        if self.player is not None:
+            self._preview_job = self.after(200, self._animate_preview)
+            return
         self._preview_idx = (self._preview_idx + 1) % total
         self._render_preview_frame(self._preview_idx)
         delay = getattr(self, "_preview_delay", 80)
