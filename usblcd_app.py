@@ -35,9 +35,13 @@ RESOLUTIONS = [
 ]
 ROTATIONS = ["0°", "90°", "180°", "270°"]
 QUALITY_LEVELS = ["High (95)", "Good (85)", "Medium (75)", "Low (60)"]
-FPS_CHOICES = ["5", "10", "15", "20", "24", "30", "60"]
+# .zt themes have no timing; play them at this fixed rate
+ZT_PLAY_FPS = 24
 SCALE_MODES = ["Fit (letterbox)", "Fill (crop)", "Stretch (fill screen)"]
 OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"]
+OVERLAY_FONT_SIZES = ["Normal", "Large", "X-Large"]
+# Font scale factors per overlay font size option (base = w//48)
+OVERLAY_FONT_SCALE = {"Normal": 1.0, "Large": 1.35, "X-Large": 1.75}
 # Minimum seconds between overlay re-renders (bounds re-encode CPU cost).
 # Lazy per-frame re-encode makes the marginal cost of faster updates tiny
 # (measured: 1s cap = 0.194 cores vs 2s = 0.171 on a 100-frame GIF).
@@ -151,6 +155,9 @@ class MonitorThread(threading.Thread):
             rotate = int(self.app.rot_var.get().replace("°", ""))
             position = self.app.overlay_pos_var.get()
             quality = int(self.app.qual_var.get().split("(")[1].rstrip(")"))
+            font_scale = OVERLAY_FONT_SCALE.get(
+                self.app.overlay_font_var.get(), 1.0
+            )
         if readings is None:
             return base_frame
         # Re-encode this one frame with overlay + current brightness
@@ -164,6 +171,7 @@ class MonitorThread(threading.Thread):
             cpu_temp_c=readings.cpu_temp_c,
             rotate=rotate,
             position=position,
+            font_scale=font_scale,
         )
         buf = _io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
@@ -185,6 +193,8 @@ class MonitorThread(threading.Thread):
                 f"{r.cpu_temp_c:.0f}" if r.cpu_temp_c else "-",
                 f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
                 f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
+                self.app.overlay_pos_var.get(),
+                self.app.overlay_font_var.get(),
             )
             now = time.monotonic()
             # Re-render only when the visible text changed AND at least
@@ -292,11 +302,12 @@ class LCDApp(tk.Tk):
                      state="readonly", width=14, style="Dark.TCombobox").grid(
             row=row, column=1, sticky="w", pady=5)
 
-        ttk.Label(settings, text="Frame rate:", style="Dark.TLabel").grid(
+        ttk.Label(settings, text="Overlay font:", style="Dark.TLabel").grid(
             row=row, column=2, sticky="w", padx=10, pady=5)
-        self.fps_var = tk.StringVar(value="24")
-        ttk.Combobox(settings, textvariable=self.fps_var, values=FPS_CHOICES,
-                     state="readonly", width=6, style="Dark.TCombobox").grid(
+        self.overlay_font_var = tk.StringVar(value=OVERLAY_FONT_SIZES[0])
+        ttk.Combobox(settings, textvariable=self.overlay_font_var,
+                     values=OVERLAY_FONT_SIZES, state="readonly", width=10,
+                     style="Dark.TCombobox").grid(
             row=row, column=3, sticky="w", pady=5)
 
         row += 1
@@ -352,9 +363,10 @@ class LCDApp(tk.Tk):
             var.trace_add("write", lambda *a: self._refresh_preview())
         self.bright_var.trace_add("write", lambda *a: self._on_brightness())
         # Persist settings changes (debounced) so they survive restarts
-        for var in (self.res_var, self.rot_var, self.qual_var, self.fps_var,
+        for var in (self.res_var, self.rot_var, self.qual_var,
                     self.scale_var, self.bright_var, self.loop_var,
-                    self.monitor_var, self.overlay_pos_var):
+                    self.monitor_var, self.overlay_pos_var,
+                    self.overlay_font_var):
             var.trace_add("write", self._schedule_config_save)
 
         # Preview
@@ -745,9 +757,8 @@ class LCDApp(tk.Tk):
             elif self._preview_slices:
                 s, e = self._preview_slices[idx]
                 frame = Image.open(io.BytesIO(self._preview_zt_data[s:e]))
-                # .zt has no timing; match the selected frame rate
-                fps = int(self.fps_var.get())
-                self._preview_delay = max(10, int(1000 / fps))
+                # .zt has no timing; play at the fixed theme rate
+                self._preview_delay = max(10, int(1000 / ZT_PLAY_FPS))
             else:
                 return
             self._show_preview_image(self._preview_transform(frame))
@@ -803,7 +814,7 @@ class LCDApp(tk.Tk):
         width, height = int(res[0]), int(res[1])
         rotate = int(self.rot_var.get().replace("°", ""))
         quality = int(self.qual_var.get().split("(")[1].rstrip(")"))
-        fps = int(self.fps_var.get())
+        fps = ZT_PLAY_FPS  # .zt themes play at a fixed rate (GIFs self-time)
         scale = self.scale_var.get().split(" ")[0].lower()
         brightness = int(self.bright_var.get())
         return width, height, rotate, quality, fps, scale, brightness
@@ -954,7 +965,6 @@ class LCDApp(tk.Tk):
         """Restore GUI controls from an own-format .zt header (main thread)."""
         if meta is None:
             return
-        app.fps_var.set(str(meta["fps"]))
         app.rot_var.set(f"{meta['rotate']}°")
         app.scale_var.set(SCALE_MODES[["fit", "fill", "stretch"].index(meta["scale"])])
         app.bright_var.set(meta["brightness"])
@@ -1190,12 +1200,12 @@ class LCDApp(tk.Tk):
                 "resolution": self.res_var.get(),
                 "rotation": self.rot_var.get(),
                 "quality": self.qual_var.get(),
-                "fps": self.fps_var.get(),
                 "scale": self.scale_var.get(),
                 "brightness": self.bright_var.get(),
                 "loop": self.loop_var.get(),
                 "monitor": self.monitor_var.get(),
                 "overlay_pos": self.overlay_pos_var.get(),
+                "overlay_font": self.overlay_font_var.get(),
             },
         }
         try:
@@ -1217,12 +1227,14 @@ class LCDApp(tk.Tk):
         self.res_var.set(s.get("resolution", self.res_var.get()))
         self.rot_var.set(s.get("rotation", self.rot_var.get()))
         self.qual_var.set(s.get("quality", self.qual_var.get()))
-        self.fps_var.set(s.get("fps", self.fps_var.get()))
         self.scale_var.set(s.get("scale", self.scale_var.get()))
         self.bright_var.set(s.get("brightness", self.bright_var.get()))
         self.loop_var.set(s.get("loop", self.loop_var.get()))
         self.monitor_var.set(s.get("monitor", self.monitor_var.get()))
         self.overlay_pos_var.set(s.get("overlay_pos", self.overlay_pos_var.get()))
+        self.overlay_font_var.set(
+            s.get("overlay_font", self.overlay_font_var.get())
+        )
         # Playlist: restore files that still exist
         for p in cfg.get("playlist", []):
             if os.path.isfile(p) and p not in self.playlist:

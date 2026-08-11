@@ -77,6 +77,7 @@ def draw_monitor_overlay(
     cpu_temp_c=None,
     rotate: int = 0,
     position: str = "top-left",
+    font_scale: float = 1.0,
 ) -> Image.Image:
     """Draw a small sensor text block in a chosen corner.
 
@@ -86,13 +87,14 @@ def draw_monitor_overlay(
     rotation, so the readings stay upright when the panel flips the image.
     `position` is the DISPLAYED corner: top-left / top-right / bottom-left /
     bottom-right (the block is repositioned so it lands there after the
-    panel's physical flip). Returns a copy — input not modified.
+    panel's physical flip). `font_scale` (1.0/1.35/1.75) adjusts the text
+    size. Returns a copy — input not modified.
     """
     from PIL import ImageDraw, ImageFont
 
     img = img.convert("RGB").copy()
     w, h = img.size
-    font_px = max(18, w // 48)  # ~33px at 1600 wide (bigger than before)
+    font_px = max(18, int(w // 48 * font_scale))  # ~33px at 1600 wide
     pad = font_px // 2
 
     lines = []
