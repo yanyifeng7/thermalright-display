@@ -561,10 +561,16 @@ class LCDApp(tk.Tk):
             return
         path = self.playlist[idx]
         self.file_path = path
-        name = os.path.basename(path)
-        self.file_label.config(text=name, foreground="#1a1a1a")
+        self.file_label.config(text=self._short_name(path), foreground="#1a1a1a")
         # Show the preview (also loads source frames for Save Theme)
         self._load_preview(path)
+
+    @staticmethod
+    def _short_name(path: str, limit: int = 30) -> str:
+        """Basename truncated with ellipsis so long filenames don't push
+        the playlist buttons off-screen."""
+        name = os.path.basename(path)
+        return name if len(name) <= limit else name[: limit - 1] + "…"
 
     def _playlist_remove(self):
         sel = list(self.playlist_list.curselection())
@@ -658,8 +664,7 @@ class LCDApp(tk.Tk):
             return
         path = self.playlist[idx]
         self.file_path = path
-        name = os.path.basename(path)
-        self.file_label.config(text=name, foreground="#1a1a1a")
+        self.file_label.config(text=self._short_name(path), foreground="#1a1a1a")
         self.playlist_list.selection_clear(0, tk.END)
         self.playlist_list.selection_set(idx)
         self.playlist_list.see(idx)
