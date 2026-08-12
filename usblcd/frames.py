@@ -211,3 +211,78 @@ def rgb565_to_image(data: bytes, w: int, h: int) -> Image.Image:
             g = ((g_hi3 << 3) | g_mid3) << 2  # 6-bit green G[7:2]
             px[x, y] = (r, g, b)
     return img
+
+
+def build_overlay_sprite(readings, width: int, height: int, rotate: int = 180,
+                         position: str = "top-left", font_scale: float = 1.0):
+    """Pre-render the monitor-overlay text block once (rotated + positioned).
+
+    Shared by the GIF overlay (MonitorThread) and the now-playing artwork
+    stream. Returns (RGBA block image, paste position) or None when there
+    are no readable sensors.
+
+    readings: object with cpu_freq_mhz, cpu_temp_c, gpu_freq_mhz, gpu_temp_c
+              (None when unavailable).
+    """
+    import math
+    from PIL import Image, ImageDraw, ImageFont
+
+    lines = []
+    if readings.cpu_freq_mhz is not None:
+        lines.append(f"CPU {readings.cpu_freq_mhz/1000:.2f} GHz")
+    if readings.cpu_temp_c is not None:
+        lines.append(f"CPU {readings.cpu_temp_c:.0f} C")
+    if readings.gpu_freq_mhz is not None:
+        lines.append(f"GPU {readings.gpu_freq_mhz} MHz")
+    if readings.gpu_temp_c is not None:
+        lines.append(f"GPU {readings.gpu_temp_c:.0f} C")
+    if not lines:
+        return None
+
+    try:
+        font = ImageFont.truetype("segoeui.ttf", font_px := max(18, int(width // 48 * font_scale)))
+    except Exception:
+        font = ImageFont.load_default()
+    pad = font_px // 2
+    d = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    line_h = int(font_px * 1.35)
+    max_w = max(d.textlength(t, font=font) for t in lines)
+    bw, bh = int(max_w) + pad * 2, line_h * len(lines) + pad
+
+    block = Image.new("RGBA", (bw, bh), (0, 0, 0, 150))
+    bd = ImageDraw.Draw(block)
+    y = pad
+    for t in lines:
+        bd.text((pad, y), t, font=font, fill=(255, 255, 255, 255))
+        y += line_h
+
+    if rotate:
+        block = block.rotate(-rotate, expand=True)
+
+    def _rot_point(px, py, angle_deg):
+        rad = math.radians(angle_deg)
+        cx, cy = width / 2.0, height / 2.0
+        dx, dy = px - cx, py - cy
+        return (
+            cx + dx * math.cos(rad) - dy * math.sin(rad),
+            cy + dx * math.sin(rad) + dy * math.cos(rad),
+        )
+
+    if position == "top-right":
+        ax, ay = _rot_point(width - pad, pad, -rotate)
+        pos = (int(ax - block.width), int(ay))
+    elif position == "bottom-left":
+        ax, ay = _rot_point(pad, height - pad, -rotate)
+        pos = (int(ax), int(ay - block.height))
+    elif position == "bottom-right":
+        ax, ay = _rot_point(width - pad, height - pad, -rotate)
+        pos = (int(ax - block.width), int(ay - block.height))
+    else:  # top-left (default)
+        ax, ay = _rot_point(pad, pad, -rotate)
+        pos = (int(ax), int(ay))
+
+    pos = (
+        max(0, min(pos[0], width - block.width)),
+        max(0, min(pos[1], height - block.height)),
+    )
+    return (block, pos)

@@ -140,81 +140,14 @@ class MonitorThread(threading.Thread):
 
     def _build_sprite(self, r):
         """Pre-render the overlay text block ONCE (rotated + positioned)."""
-        from PIL import ImageDraw, ImageFont
+        from usblcd.frames import build_overlay_sprite
 
-        w, h = self.width, self.height
         rotate = int(self.app.rot_var.get().replace("°", ""))
         position = self.app.overlay_pos_var.get()
         font_scale = OVERLAY_FONT_SCALE.get(self.app.overlay_font_var.get(), 1.0)
-        font_px = max(18, int(w // 48 * font_scale))
-        pad = font_px // 2
-
-        lines = []
-        if r.cpu_freq_mhz is not None:
-            lines.append(f"CPU {r.cpu_freq_mhz/1000:.2f} GHz")
-        if r.cpu_temp_c is not None:
-            lines.append(f"CPU {r.cpu_temp_c:.0f} C")
-        if r.gpu_freq_mhz is not None:
-            lines.append(f"GPU {r.gpu_freq_mhz} MHz")
-        if r.gpu_temp_c is not None:
-            lines.append(f"GPU {r.gpu_temp_c:.0f} C")
-        if not lines:
-            self._sprite = None
-            return
-
-        try:
-            font = ImageFont.truetype("segoeui.ttf", font_px)
-        except Exception:
-            font = ImageFont.load_default()
-        d = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-        line_h = int(font_px * 1.35)
-        max_w = max(d.textlength(t, font=font) for t in lines)
-        bw, bh = int(max_w) + pad * 2, line_h * len(lines) + pad
-
-        block = Image.new("RGBA", (bw, bh), (0, 0, 0, 150))
-        bd = ImageDraw.Draw(block)
-        y = pad
-        for t in lines:
-            bd.text((pad, y), t, font=font, fill=(255, 255, 255, 255))
-            y += line_h
-
-        # Rotate the block the same way the frame is rotated so the text
-        # ends up upright after the panel's physical flip
-        if rotate:
-            block = block.rotate(-rotate, expand=True)
-
-        # Anchor = desired DISPLAYED corner point, rotated by -rotate
-        # around the frame center (same math as draw_monitor_overlay,
-        # hardware-verified). The block's relevant corner lands on it.
-        import math
-
-        def _rot_point(px, py, angle_deg):
-            rad = math.radians(angle_deg)
-            cx, cy = w / 2.0, h / 2.0
-            dx, dy = px - cx, py - cy
-            return (
-                cx + dx * math.cos(rad) - dy * math.sin(rad),
-                cy + dx * math.sin(rad) + dy * math.cos(rad),
-            )
-
-        if position == "top-right":
-            ax, ay = _rot_point(w - pad, pad, -rotate)
-            pos = (int(ax - block.width), int(ay))
-        elif position == "bottom-left":
-            ax, ay = _rot_point(pad, h - pad, -rotate)
-            pos = (int(ax), int(ay - block.height))
-        elif position == "bottom-right":
-            ax, ay = _rot_point(w - pad, h - pad, -rotate)
-            pos = (int(ax - block.width), int(ay - block.height))
-        else:  # top-left (default)
-            ax, ay = _rot_point(pad, pad, -rotate)
-            pos = (int(ax), int(ay))
-
-        pos = (
-            max(0, min(pos[0], w - block.width)),
-            max(0, min(pos[1], h - block.height)),
+        self._sprite = build_overlay_sprite(
+            r, self.width, self.height, rotate, position, font_scale
         )
-        self._sprite = (block, pos)
 
     def get_frame(self, i: int, base_frame: bytes) -> bytes:
         """Return the overlaid frame: paste the cached sprite, encode once."""
@@ -557,6 +490,9 @@ class LCDApp(tk.Tk):
         self._np_last_art: Image.Image | None = None
         self._np_last_frame: bytes | None = None  # last JPEG frame sent to AIO
         self._np_base_jpeg: bytes | None = None  # clean bar-less base frame
+        self._np_sprite: tuple | None = None     # overlay sprite (block, pos)
+        self._np_sprite_text = None              # last sprite staleness key
+        self._np_sensor = None                   # lazy SensorMonitor
 
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         # Guard: the notebook fires this event during construction (when the
@@ -1032,8 +968,36 @@ class LCDApp(tk.Tk):
             # Priority: auto-display checked OR now-playing tab active.
             want_art = self.np_auto_var.get() or self._np_active
             if self.lcd is not None and want_art and self._np_last_art is not None:
+                w, h = 1600, 720
+                # Monitor overlay: poll sensors + rebuild the sprite when the
+                # visible text changes (same staleness logic as the GIF overlay)
+                if self.monitor_var.get():
+                    try:
+                        if self._np_sensor is None:
+                            from usblcd.sensors import SensorMonitor
+                            self._np_sensor = SensorMonitor()
+                        r = self._np_sensor.read()
+                        text = (
+                            f"{r.cpu_freq_mhz/1000:.2f}" if r.cpu_freq_mhz else "-",
+                            f"{r.cpu_temp_c:.0f}" if r.cpu_temp_c else "-",
+                            f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
+                            f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
+                            self.overlay_pos_var.get(),
+                            self.overlay_font_var.get(),
+                        )
+                        if text != self._np_sprite_text:
+                            self._np_sprite_text = text
+                            from usblcd.frames import build_overlay_sprite
+                            rot_s = str(self.rot_var.get()).replace("°", "").strip()
+                            rotate = int(rot_s) if rot_s.isdigit() else 0
+                            self._np_sprite = build_overlay_sprite(
+                                r, w, h, rotate,
+                                self.overlay_pos_var.get(),
+                                OVERLAY_FONT_SCALE.get(self.overlay_font_var.get(), 1.0),
+                            )
+                    except Exception:
+                        pass
                 try:
-                    w, h = 1600, 720
                     # Rot values come as "180°" — strip the degree symbol
                     rot_s = str(self.rot_var.get()).replace("°", "").strip()
                     rotate = int(rot_s) if rot_s.isdigit() else 0
@@ -1068,6 +1032,11 @@ class LCDApp(tk.Tk):
                             base_img = apply_brightness(base_img, brightness)
                         base_img.save(buf, format="JPEG", quality=92)
                         self._np_base_jpeg = buf.getvalue()
+                    # Overlay: paste the monitor sprite onto the artwork frame
+                    # when Monitor overlay is enabled (same as GIF playback).
+                    if self.monitor_var.get() and self._np_sprite is not None:
+                        block, paste = self._np_sprite
+                        img.paste(block, paste, block)
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=92)
                     self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
