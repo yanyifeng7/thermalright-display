@@ -108,29 +108,33 @@ def render_now_playing(
     panel.paste(bg, (0, 0))
     panel.paste(dark, (0, 0), Image.new("RGBA", (width, height), (0, 0, 0, 110)))
 
-    # 2. Centered album square (left-of-center, classic layout)
+    # 2. Album square on the right side (panel rotated 180 -> visually left)
     side = min(width // 3, height - 120)
     art_sq = art.copy().convert("RGB")
     art_sq = _scale(art_sq, (side, side), mode="fill")
     # Subtle border
-    ax = 80
+    margin = 80
+    ax = (width - side) // 2 + 220  # past center, toward right side
     ay = (height - side) // 2
     panel.paste(art_sq, (ax, ay))
     draw.rectangle([ax, ay, ax + side - 1, ay + side - 1],
                    outline=(255, 255, 255, 60), width=2)
 
-    # 3. Text (right of album art)
-    tx = ax + side + 40
+    # 3. Text (left of album art)
+    tx = margin
     ty = ay + 30
     font_title = _font(72)
     font_artist = _font(40)
 
-    # Truncate long titles to one line
+    # Truncate long titles to one line (limit to left half, beside the art)
     title = title.strip() if title else "—"
     artist = artist.strip() if artist else ""
-    while draw.textlength(title, font=font_title) > width - tx - 60 and len(title) > 4:
+    max_text_w = ax - tx - 40  # leave gap before album art
+    while draw.textlength(title, font=font_title) > max_text_w and len(title) > 4:
         title = title[:-2]
-    artist = artist if draw.textlength(artist, font=font_artist) <= width - tx - 60 \
+    while draw.textlength(artist, font=font_artist) > max_text_w and len(artist) > 4:
+        artist = artist[:-2]
+    artist = artist if draw.textlength(artist, font=font_artist) <= max_text_w \
         else (artist[:60] + "…") if len(artist) > 60 else artist
 
     draw.text((tx, ty), title, fill=(245, 245, 248), font=font_title)
