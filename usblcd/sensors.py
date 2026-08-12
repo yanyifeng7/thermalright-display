@@ -31,13 +31,17 @@ class SensorMonitor:
     real AMD SMU sensors (Tctl/Tdie) that user-mode WMI can't see.
     """
 
-    def __init__(self):
+    def __init__(self, auto_launch_lhm: bool = False):
         self._lock = threading.Lock()
         self._nvml = None      # None = not initialized
         self._nvml_handle = None
         self._nvml_failed = False
         self._lhm_url = "http://localhost:8085/data.json"
         self._lhm_launch_tried = False  # only attempt auto-launch once
+        # Auto-launch is OPT-IN (default off): launching LHM installs a
+        # kernel driver, so it must never surprise a new user with a UAC
+        # prompt. The GUI enables it via config (auto_launch_lhm).
+        self._auto_launch = auto_launch_lhm
         self._lhm_paths = (
             r"D:\AI\LibreHardwareMonitor\LibreHardwareMonitor.exe",
             # Common install locations
@@ -118,10 +122,10 @@ class SensorMonitor:
             with urllib.request.urlopen(self._lhm_url, timeout=2) as resp:
                 data = _json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:
-            # LHM isn't running — try to launch it once (it's needed for
-            # CPU temp/freq). Uses a self-elevating .bat so the kernel
-            # driver loads with one familiar UAC prompt.
-            if not self._lhm_launch_tried:
+            # LHM isn't running. Auto-launch only when the user opted in
+            # (auto_launch_lhm); otherwise leave a hint for the caller —
+            # return a marker so the GUI can show 'LHM not running'.
+            if self._auto_launch and not self._lhm_launch_tried:
                 self._lhm_launch_tried = True
                 self._try_launch_lhm()
             return r

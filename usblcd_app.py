@@ -130,7 +130,9 @@ class MonitorThread(threading.Thread):
         if self._sensor is None:
             from usblcd.sensors import SensorMonitor
 
-            self._sensor = SensorMonitor()
+            self._sensor = SensorMonitor(
+                auto_launch_lhm=self.app.lhm_auto_var.get()
+            )
         return self._sensor
 
     def invalidate(self):
@@ -205,6 +207,11 @@ class MonitorThread(threading.Thread):
                     parts.append(f"GPU {r.gpu_freq_mhz} MHz {r.gpu_temp_c:.0f}C")
                     # Marshal to the tk main thread (widgets aren't thread-safe)
                     msg = "Monitor: " + " | ".join(parts)
+                    if r.cpu_temp_c is None:
+                        # LHM missing and not auto-launching: hint instead of
+                        # silently hiding the CPU temp line.
+                        msg += ("  (LHM not running — enable 'Auto-start LHM' "
+                                "in settings for CPU temp)")
                     try:
                         self.app.after(0, lambda m=msg: self.on_status(m, "#1a8a3a"))
                     except Exception:
@@ -351,6 +358,16 @@ class LCDApp(tk.Tk):
         self.np_auto_var.trace_add("write", lambda *a: self._np_auto_changed())
 
         row += 1
+        self.lhm_auto_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(settings,
+                        text="Auto-start LHM if missing (admin prompt)",
+                        variable=self.lhm_auto_var,
+                        style="Dark.TCheckbutton").grid(
+            row=row, column=1, columnspan=3, sticky="w", pady=5)
+        # Auto-launching LHM installs a kernel driver — strictly opt-in.
+        # Enabling it only affects the next SensorMonitor creation.
+
+        row += 1
         ttk.Label(settings, text="Overlay pos:", style="Dark.TLabel").grid(
             row=row, column=0, sticky="w", padx=10, pady=5)
         self.overlay_pos_var = tk.StringVar(value=OVERLAY_POSITIONS[0])
@@ -370,7 +387,8 @@ class LCDApp(tk.Tk):
         for var in (self.res_var, self.rot_var, self.qual_var,
                     self.scale_var, self.bright_var, self.loop_var,
                     self.monitor_var, self.overlay_pos_var,
-                    self.overlay_font_var, self.np_auto_var):
+                    self.overlay_font_var, self.np_auto_var,
+                    self.lhm_auto_var):
             var.trace_add("write", self._schedule_config_save)
 
         # Tabbed content: [Playlist] [Now Playing]
@@ -979,7 +997,9 @@ class LCDApp(tk.Tk):
                         try:
                             if self._np_sensor is None:
                                 from usblcd.sensors import SensorMonitor
-                                self._np_sensor = SensorMonitor()
+                                self._np_sensor = SensorMonitor(
+                                    auto_launch_lhm=self.lhm_auto_var.get()
+                                )
                             r = self._np_sensor.read()
                             text = (
                                 f"{r.cpu_freq_mhz/1000:.2f}" if r.cpu_freq_mhz else "-",
@@ -1651,6 +1671,7 @@ class LCDApp(tk.Tk):
                 "loop": self.loop_var.get(),
                 "monitor": self.monitor_var.get(),
                 "auto_art": self.np_auto_var.get(),
+                "auto_lhm": self.lhm_auto_var.get(),
                 "overlay_pos": self.overlay_pos_var.get(),
                 "overlay_font": self.overlay_font_var.get(),
             },
@@ -1679,6 +1700,7 @@ class LCDApp(tk.Tk):
         self.loop_var.set(s.get("loop", self.loop_var.get()))
         self.monitor_var.set(s.get("monitor", self.monitor_var.get()))
         self.np_auto_var.set(s.get("auto_art", self.np_auto_var.get()))
+        self.lhm_auto_var.set(s.get("auto_lhm", self.lhm_auto_var.get()))
         self.overlay_pos_var.set(s.get("overlay_pos", self.overlay_pos_var.get()))
         self.overlay_font_var.set(
             s.get("overlay_font", self.overlay_font_var.get())

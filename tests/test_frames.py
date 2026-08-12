@@ -100,6 +100,35 @@ def test_sprite_pastes_with_alpha(readings):
     assert sum(px) < 3 * 200
 
 
+# ---------- SensorMonitor auto-launch opt-in ----------
+
+def test_sensor_auto_launch_defaults_off():
+    """Auto-launching LHM installs a kernel driver — it must be strictly
+    opt-in. New users must never get a surprise UAC prompt."""
+    from usblcd.sensors import SensorMonitor
+
+    m = SensorMonitor()
+    assert m._auto_launch is False
+    m2 = SensorMonitor(auto_launch_lhm=True)
+    assert m2._auto_launch is True
+
+
+def test_sensor_auto_launch_not_fired_when_off(monkeypatch):
+    """With auto_launch off, a failed LHM read must NOT try to launch."""
+    from usblcd.sensors import SensorMonitor
+
+    m = SensorMonitor(auto_launch_lhm=False)
+    launched = []
+
+    def fake_launch():
+        launched.append(True)
+
+    monkeypatch.setattr(m, "_try_launch_lhm", fake_launch)
+    monkeypatch.setattr(m, "_lhm_url", "http://localhost:9/data.json")  # unreachable
+    m._read_lhm()
+    assert launched == [], "auto-launch fired even though opt-in is off"
+
+
 # ---------- jpeg_to_frame ----------
 
 def test_jpeg_to_frame_header(jpeg_bytes):
