@@ -137,9 +137,9 @@ def render_now_playing(
     artist = artist if draw.textlength(artist, font=font_artist) <= max_text_w \
         else (artist[:60] + "…") if len(artist) > 60 else artist
 
-    draw.text((tx, ty), title, fill=(245, 245, 248), font=font_title)
-    draw.text((tx, ty + 100), artist, fill=(180, 185, 195), font=font_artist)
-    draw.text((tx, ty + 170), "NOW PLAYING", fill=(130, 140, 160), font=_font(24))
+    _draw_text(draw, (tx, ty), title, font_title, fill=(245, 245, 248))
+    _draw_text(draw, (tx, ty + 100), artist, font_artist, fill=(180, 185, 195))
+    _draw_text(draw, (tx, ty + 170), "NOW PLAYING", _font(24), fill=(130, 140, 160))
 
     # 4. Apply rotation (panel may be physically flipped)
     if rotate:
@@ -168,11 +168,75 @@ def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Imag
     return bg
 
 
+# CJK font fallback chain (Windows ships these by default).
+# segoeui.ttf = Latin (primary); msgothic.ttc = Japanese; msyh.ttc = Chinese;
+# malgun.ttf = Korean. The first font whose font_variant() covers the
+# given text is used; missing glyphs fall through automatically.
+_CJK_FONTS = ("segoeui.ttf", "msgothic.ttc", "msyh.ttc", "malgun.ttf", "simhei.ttf")
+
+
 def _font(px: int) -> ImageFont.FreeTypeFont:
+    """Primary Latin font (segoeui). Use this for ASCII text."""
     try:
         return ImageFont.truetype("segoeui.ttf", px)
     except Exception:
         return ImageFont.load_default()
+
+
+def _draw_text(draw, pos, text, font, fill, anchor=None):
+    """Draw text with CJK fallback — auto-switch font per character range
+    so Japanese / Chinese / Korean render correctly."""
+    if not text:
+        return
+    try:
+        # Try the primary font first; if it covers everything, skip the fallback
+        # (faster path for ASCII-only text — the common case).
+        mask = font.getmask(text)
+        x, y = pos
+        if anchor:
+            draw.text((x, y), text, fill=fill, font=font, anchor=anchor)
+        else:
+            draw.text((x, y), text, fill=fill, font=font)
+        return
+    except Exception:
+        pass
+    # Fallback: build per-character font picks. For each char, pick the
+    # first font in our chain that covers it. This is rare (only hits
+    # when the primary font fails) so we don't worry about speed.
+    # Group consecutive chars by font to minimize draw.text calls.
+    groups = []  # [(font_obj, "substring")]
+    cur_font = None
+    cur_chars = []
+    for ch in text:
+        chosen = None
+        for fname in _CJK_FONTS:
+            try:
+                f = ImageFont.truetype(fname, font.size)
+                # getmask() raises if the glyph is missing
+                f.getmask(ch)
+                chosen = f
+                break
+            except Exception:
+                continue
+        if chosen is None:
+            chosen = font  # last resort: paint boxes
+        if chosen is cur_font:
+            cur_chars.append(ch)
+        else:
+            if cur_font is not None:
+                groups.append((cur_font, "".join(cur_chars)))
+            cur_font = chosen
+            cur_chars = [ch]
+    if cur_font is not None:
+        groups.append((cur_font, "".join(cur_chars)))
+    x, y = pos
+    for f, s in groups:
+        draw.text((x, y), s, fill=fill, font=f)
+        # advance x by the rendered width
+        try:
+            x += int(f.getlength(s))
+        except Exception:
+            pass
 
 
 # ---------- Main loop ---------- #
