@@ -12,7 +12,7 @@
 That's it. On first run the launcher:
 - creates a virtual environment (`.venv`) inside the project folder,
 - installs the dependencies automatically (`pyusb`, `Pillow`, `libusb`,
-  `nvidia-ml-py`, `psutil`),
+  `nvidia-ml-py`, `psutil`, `winsdk`),
 - opens the GUI.
 
 All future launches are instant — just double-click again.
@@ -32,7 +32,9 @@ All future launches are instant — just double-click again.
 | **Brightness** | click the bar (0-100, click outside the ends for 0/100) |
 | **Overlay font** | Normal / Large / X-Large text size for the monitor overlay |
 | **Monitor overlay** | draw live CPU/GPU temp + freq on the animation (see below) |
+| **Auto-display artwork** | when checked (default), the AIO shows the current song's album art whenever music is playing — it takes priority over the playlist |
 | **Repeat** | loop the playlist forever (off = stop after the last item) |
+| **Tabs: Playlist / Now Playing** | Playlist = GIFs/themes; Now Playing = live album art + progress from any music app (Apple Music, Spotify, etc.) |
 | **Connect / Play / Stop** | obvious 🙂 |
 
 > The playlist + all settings are saved automatically to `config.json` in
@@ -55,6 +57,42 @@ Why: Windows exposes only a frozen ACPI thermal stub on AMD X870E boards;
 LHM's driver reads the real SMU sensor. Without LHM the overlay simply omits
 the CPU temp line (GPU readings still work). LHM costs ~123 MB RAM / ~0.02
 cores.
+
+## Optional: Now Playing (album art on the AIO)
+
+The **Now Playing** tab shows the current track from any app that registers
+with Windows media controls — **Apple Music, Spotify, foobar2000, MusicBee,
+web browsers**, etc. — with live album art, title/artist, and a progress bar.
+It mirrors to the AIO automatically.
+
+**Requirement:** the `winsdk` package (installed automatically by
+`start_gui.bat` via `requirements.txt`). This is the only extra dependency
+for this feature — everything else is shared.
+
+**Usage:**
+1. Open the GUI, connect the display.
+2. Play something in Apple Music (or any music app).
+3. The **Now Playing tab** shows the track; with **Auto-display artwork**
+   checked (default in Display settings), the AIO shows the album art
+   automatically — no Play button needed.
+
+**Details:**
+- Works with *any* app that appears in the Windows volume-flyout media card.
+- The AIO stream includes a progress bar with mm:ss times (updated every
+  second, interpolated for smooth motion).
+- CJK/Japanese/Chinese/Korean titles render correctly — **Noto Serif SC VF**
+  is bundled in `fonts/` (SIL Open Font License, see `fonts/OFL.txt`).
+  Source: [github.com/notofonts/noto-fonts](https://github.com/notofonts/noto-fonts)
+  / [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Serif+SC).
+  If the bundled file is missing it falls back to the Windows-shipped copy
+  (`C:\Windows\Fonts\NotoSerifSC-VF.ttf`, Win 11 22H2+) then MS Gothic.
+- No music playing? The display falls back to whatever the playlist would
+  show.
+
+There's also a standalone CLI:
+```bash
+.venv\Scripts\python now_playing.py
+```
 
 ## Manual setup (if you prefer the command line)
 

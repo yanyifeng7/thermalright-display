@@ -13,6 +13,8 @@ Verified end-to-end on a **Thermalright Rainbow** AIO (panel is a Somore "USBDIS
 - **Playlist mode** ✅ (play multiple GIFs/themes in sequence, zero-pause switching, loop on/off)
 - **Auto-persist** ✅ (playlist + all display settings saved to `config.json`, restored on launch)
 - **Live monitor overlay** ✅ (CPU temp/freq + GPU temp/freq drawn on the animation, 4 corner positions, 3 font sizes, rotates with the frame)
+- **Now Playing tab** ✅ (live album art + title/artist/progress from any music app — Apple Music, Spotify, foobar2000 — mirrored to the AIO)
+- **Auto-display artwork** ✅ (checkbox: artwork takes priority over the playlist whenever music is playing)
 - **Dark UI** ✅ (modern dark theme, no more win95-era gray)
 
 ## Live monitoring overlay
@@ -56,6 +58,51 @@ drawing or rotation math. Stats are **always live** (rebuild on every visible
 text change — no staleness cap), because rebuilding the sprite is cheap.
 Overlay position + font size (Normal/Large/X-Large) are selectable and
 persisted.
+
+## Now Playing (album art on the AIO)
+
+The **Now Playing tab** shows what's currently playing in any app that
+registers with Windows media controls — Apple Music, Spotify, foobar2000,
+MusicBee, browsers, etc. — and can mirror it to the AIO:
+
+```
+┌───────────────────────────────────────┐
+│  [blurred album art as background]    │
+│                                       │
+│  Title — Artist           [album]     │
+│  ▓▓▓▓▓▓▓▓░░░░░░░░  (progress bar)    │
+│  1:23 / 4:05                          │
+└───────────────────────────────────────┘
+```
+
+- **Data source:** Windows **GSMTC** API (`GlobalSystemMediaTransportControls`)
+  — the same one that powers the volume-flyout media card. Polled once per
+  second: title, artist, album art (512px JPEG thumbnail), position, duration.
+- **Auto-display artwork** checkbox (Display settings): when checked (default),
+  artwork takes priority — the AIO shows the now-playing render whenever music
+  is playing, regardless of the active tab or Play button. Unchecked: the
+  active tab at Play time decides.
+- **Keepalive:** the frame is re-sent every 100 ms so the panel stays lit
+  between 1-second polls (the AIO blanks after ~1-2s without data).
+- **Smooth progress bar:** position is interpolated between GSMTC polls
+  (which have 1-second granularity) using a local monotonic timer; the bar
+  rebuilds 4×/sec via a cheap strip redraw (~5 ms — decode base, patch bar,
+  re-encode) instead of a full 50 ms render.
+- **CJK titles render correctly** — the repo bundles **Noto Serif SC VF**
+  (Google Noto, [SIL Open Font License](https://scripts.sil.org/OFL)) in
+  `fonts/`, covering Latin + Japanese + Chinese + Korean. If the bundled
+  file is missing, the app falls back to the Windows-shipped copy
+  (`C:\Windows\Fonts\NotoSerifSC-VF.ttf`, Win 11 22H2+), then MS Gothic.
+  License text: [`fonts/OFL.txt`](fonts/OFL.txt).
+  Source/upstream: [github.com/notofonts/noto-fonts](https://github.com/notofonts/noto-fonts)
+  (Noto Serif SC variable font, download under
+  [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Serif+SC)).
+
+**Cost:** ~0.022 cores (2.2%) for the full GUI with artwork streaming — the
+same ballpark as the CLI script (0.041 cores). GSMTC polling itself is
+~2.5 ms/poll (negligible).
+
+> **`winsdk` is required for the Now Playing feature** — see [INSTALL.md](INSTALL.md).
 
 ## Performance: ~190× lighter than TRCC
 
@@ -173,10 +220,12 @@ Manual / CLI setup:
 
 ```
 pip install -r requirements.txt
+pip install winsdk          # only needed for the Now Playing / album-art feature
 python send_image.py --image frame.jpg --width 1600 --height 720
 python send_image.py --image frame.jpg --width 1600 --height 720 --rotate 180 --stay
 python gif_player.py --gif anim.gif --width 1600 --height 720 --rotate 180
 python gif_player.py --gif theme.zt --width 1600 --height 720 --rotate 180 --fps 24
+python now_playing.py       # CLI: show current track's album art on the AIO
 ```
 
 `--stay` re-sends the frame every second (panels blank on USB idle in some cases) with auto-reconnect.
@@ -191,9 +240,11 @@ usblcd-display/
 │   ├── sensors.py       # sensor reads (LHM web server + NVML/psutil fallback)
 │   ├── ztfile.py        # .zt theme read (TRCC compatibility)
 │   └── theme.py         # dark UI palette + ttk styles
-├── usblcd_app.py        # GUI (playlist, preview, monitor overlay)
+├── usblcd_app.py        # GUI (tabs: Playlist + Now Playing, monitor overlay)
+├── now_playing.py       # CLI: album art + progress from any GSMTC music app
 ├── send_image.py        # CLI: send a single image
 ├── gif_player.py        # CLI: play a GIF/theme
+├── fonts/               # Noto Serif SC VF (OFL-licensed, Git LFS) + OFL.txt
 ├── tests/               # unit tests
 └── docs/                # protocol notes
 ```

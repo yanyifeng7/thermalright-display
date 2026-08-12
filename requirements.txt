@@ -3,3 +3,4 @@ Pillow>=10.0.0
 libusb>=1.0.27
 nvidia-ml-py>=12.560.30
 psutil>=5.9.0
+winsdk>=1.0.0b10
