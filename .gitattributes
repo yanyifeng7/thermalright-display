@@ -1,0 +1,4 @@
+# Large binary assets — track via Git LFS
+fonts/*.ttf filter=lfs diff=lfs merge=lfs -text
+fonts/*.ttc filter=lfs diff=lfs merge=lfs -text
+fonts/*.otf filter=lfs diff=lfs merge=lfs -text

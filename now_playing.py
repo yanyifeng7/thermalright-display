@@ -215,22 +215,34 @@ def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Imag
     return bg
 
 
-# Font chain. NotoSerifSC-VF (Google Noto Serif SC, ships on Windows 11
-# 22H2+) is our primary — elegant classical serif covering Latin +
-# Japanese + Chinese + Korean. msgothic.ttc is the fallback (always
-# present, slightly less refined).
-_FONT_PRIMARY = "NotoSerifSC-VF.ttf"
+# Font chain. NotoSerifSC-VF (Google Noto Serif SC) is bundled in
+# fonts/ under the SIL Open Font License v1.1 — covers Latin + JP + CN + KR.
+# If the bundled file is missing, we fall back to the Windows-shipped
+# versions of the same font family, then msgothic.ttc.
+import os as _os
+_FONT_PRIMARY = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                              "fonts", "NotoSerifSC-VF.ttf")
 _FONT_LATIN = "segoeui.ttf"
-_CJK_FONTS = (_FONT_PRIMARY, "msgothic.ttc", "msyh.ttc", "malgun.ttf", "simhei.ttf")
+_CJK_FONTS = (_FONT_PRIMARY,
+             # Windows fallbacks (in case the bundled file is missing)
+             "NotoSerifSC-VF.ttf",  # Windows 11 22H2+ ships it
+             "msgothic.ttc",
+             "msyh.ttc",
+             "malgun.ttf",
+             "simhei.ttf")
 
 
 def _font(px: int) -> ImageFont.FreeTypeFont:
-    """Primary font (Noto Serif SC VF): elegant classical serif covering
-    Latin + JP + CN + KR. Ships on Windows 11 22H2+."""
-    try:
-        return ImageFont.truetype(_FONT_PRIMARY, px)
-    except Exception:
-        return ImageFont.load_default()
+    """Primary font (Noto Serif SC VF, bundled under OFL): elegant
+    classical serif covering Latin + JP + CN + KR. Falls back to
+    Windows-shipped variants if the bundled file is missing."""
+    for fname in (_FONT_PRIMARY,) + _CJK_FONTS[1:]:
+        if _os.path.isfile(fname):
+            try:
+                return ImageFont.truetype(fname, px)
+            except Exception:
+                continue
+    return ImageFont.load_default()
 
 
 def _latin_font(px: int) -> ImageFont.FreeTypeFont:
@@ -299,18 +311,62 @@ def main():
     # no new data for ~1-2s, so we re-send the current frame every 100ms.
     # (Cost: a single ~180KB JPEG every 100ms = ~1.8MB/s USB, trivial.)
     REFRESH_INTERVAL_S = 0.1
+    # GSMTC timeline has 1s granularity, so we interpolate the position
+    # between polls for smooth bar motion. We rebuild the frame when the
+    # interpolated position has visibly moved (every 250ms is plenty).
+    GSMTC_POLL_S = 1.0
+    POS_REBUILD_S = 0.25
+    last_gsmtc_poll = 0.0
+    last_gsmtc_pos = 0.0
+    last_gsmtc_track = None
+    last_rebuild = 0.0
+    # Cache the last good session/info so we don't flicker when a single
+    # GSMTC call times out (Apple Music sometimes returns blank for one
+    # cycle while it re-fetches media properties).
+    last_session = None
+    last_info = None
+    last_app_id = None
+    last_duration = 0.0
 
     try:
         while True:
-            session, info, app_id, position_sec, duration_sec = _get_active_session()
+            now_mono = time.monotonic()
+            # Poll GSMTC every GSMTC_POLL_S (1s). Otherwise use the
+            # interpolated position (last GSMTC reading + elapsed time).
+            if now_mono - last_gsmtc_poll >= GSMTC_POLL_S:
+                session, info, app_id, gsmtc_pos, duration_sec = _get_active_session()
+                last_gsmtc_poll = now_mono
+                # Cache the good result so a single transient miss
+                # (Apple Music re-fetching media properties) doesn't
+                # flicker the display to "no active media".
+                if info is not None and info.title:
+                    last_session, last_info, last_app_id = session, info, app_id
+                    last_duration = duration_sec
+                # Detect track changes (or huge position jumps e.g. user seeked).
+                track_now = info.title if info and info.title else None
+                if track_now != last_gsmtc_track or abs(gsmtc_pos - last_gsmtc_pos) > 2:
+                    last_gsmtc_track = track_now
+                last_gsmtc_pos = gsmtc_pos
+
+            # Use the cached session if this iteration's GSMTC call missed
+            if info is None and last_info is not None:
+                session, info, app_id = last_session, last_info, last_app_id
+                duration_sec = last_duration
+
+            # Interpolate: assume the song plays at 1x speed from the
+            # last GSMTC reading until the next one arrives. GSMTC
+            # occasionally corrects this.
+            position_sec = last_gsmtc_pos + (time.monotonic() - last_gsmtc_poll)
+            # Clamp to duration
+            if duration_sec > 0:
+                position_sec = min(position_sec, duration_sec)
 
             if info is None:
-                # No active media — show a calm "nothing playing" panel
+                # No active media (and no cache) — show a calm panel
                 if last_key != "__idle__":
                     print(f"[{time.strftime('%H:%M:%S')}] no active media session")
                     last_key = "__idle__"
                     last_frame = None
-                # Build a "no track" frame once, re-send it at REFRESH_INTERVAL_S
                 if last_frame is None:
                     img = Image.new("RGB", (args.width, args.height), (10, 10, 14))
                     d = ImageDraw.Draw(img)
@@ -330,16 +386,21 @@ def main():
             title = info.title or ""
             artist = info.artist or ""
             track_key = f"{app_id}|{title}|{artist}"
-            # Position changes every second; rebuild when it shifts enough
-            # to be visible (every 1s on the bar — same as ~1mm:ss tick).
-            pos_key = int(position_sec) if duration_sec > 0 else 0
-            key = (track_key, pos_key)
 
-            # Build a new frame when the track changes OR every ~1s
-            if key != last_key:
+            # Rebuild every POS_REBUILD_S for smooth bar motion (or on track change).
+            # Frame build is expensive (~30ms), so we throttle: only rebuild
+            # when the position has visibly moved or the track changed.
+            now_mono = time.monotonic()
+            should_rebuild = (
+                last_key is None
+                or last_key[0] != track_key
+                or (now_mono - last_rebuild) >= POS_REBUILD_S
+            )
+            if should_rebuild:
+                # Throttle the "new track" log so we don't spam on every rebuild
                 if last_key is None or last_key[0] != track_key:
                     print(f"[{time.strftime('%H:%M:%S')}] {app_id}: {title} — {artist}")
-                last_key = key
+                # Build frame
                 art = _get_thumbnail_pil(info)
                 if art is None:
                     no_art_counter += 1
@@ -359,6 +420,8 @@ def main():
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=args.quality)
                 last_frame = jpeg_to_frame(buf.getvalue(), *img.size)
+                last_rebuild = now_mono
+                last_key = (track_key,)
 
             # Re-send the current frame at the panel refresh rate (keeps
             # the AIO from powering down the display between track changes)
@@ -366,7 +429,8 @@ def main():
             if now - last_send_time >= REFRESH_INTERVAL_S:
                 lcd.send_frame(last_frame)
                 last_send_time = now
-            time.sleep(args.poll)
+            # Short sleep to keep CPU low (this loop runs ~10x/sec)
+            time.sleep(0.05)
     except KeyboardInterrupt:
         print("\nStopping.")
     finally:
