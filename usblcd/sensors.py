@@ -37,6 +37,13 @@ class SensorMonitor:
         self._nvml_handle = None
         self._nvml_failed = False
         self._lhm_url = "http://localhost:8085/data.json"
+        self._lhm_launch_tried = False  # only attempt auto-launch once
+        self._lhm_paths = (
+            r"D:\AI\LibreHardwareMonitor\LibreHardwareMonitor.exe",
+            # Common install locations
+            r"C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitor.exe",
+            r"C:\Program Files (x86)\LibreHardwareMonitor\LibreHardwareMonitor.exe",
+        )
 
     # ---------- NVML (GPU) ----------
 
@@ -59,6 +66,39 @@ class SensorMonitor:
 
     # ---------- LibreHardwareMonitor (single source for CPU+GPU) ----------
 
+    def _try_launch_lhm(self):
+        """Best-effort auto-launch of LibreHardwareMonitor.
+
+        Writes a tiny self-elevating .bat (the kernel driver needs admin)
+        and fires it once. If elevation is declined or the exe isn't
+        found, we simply fall back to NVML/psutil — never crash.
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        exe = next((p for p in self._lhm_paths if os.path.isfile(p)), None)
+        if exe is None:
+            return
+        try:
+            bat = os.path.join(tempfile.gettempdir(), "lhm_autostart.bat")
+            with open(bat, "w", encoding="utf-8") as f:
+                # Self-elevate: restart via PowerShell Start-Process -Verb RunAs
+                f.write(
+                    "@echo off\r\n"
+                    'powershell.exe -NoProfile -Command "\r\n'
+                    "  $p = Start-Process -FilePath '%s' -Verb RunAs -PassThru\r\n"
+                    '"\r\n' % exe.replace("'", "''")
+                )
+            # Fire and forget; the UAC prompt appears for the user once.
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                close_fds=True,
+            )
+        except Exception:
+            pass
+
     def _read_lhm(self) -> SensorReadings:
         """Fetch CPU temp/freq + GPU temp/freq from LHM's web server.
 
@@ -78,6 +118,12 @@ class SensorMonitor:
             with urllib.request.urlopen(self._lhm_url, timeout=2) as resp:
                 data = _json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:
+            # LHM isn't running — try to launch it once (it's needed for
+            # CPU temp/freq). Uses a self-elevating .bat so the kernel
+            # driver loads with one familiar UAC prompt.
+            if not self._lhm_launch_tried:
+                self._lhm_launch_tried = True
+                self._try_launch_lhm()
             return r
         temps = []
         freqs = []
