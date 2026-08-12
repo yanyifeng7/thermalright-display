@@ -168,7 +168,7 @@ def render_now_playing(
         fill_w = max(1, int(bar_w * ratio)) if ratio > 0 else 0
         if fill_w > 0:
             draw.rectangle([tx, bar_y, tx + fill_w, bar_y + bar_h],
-                           fill=(95, 195, 230))  # bright cyan accent
+                           fill=(200, 205, 215))  # light gray fill
         # mm:ss labels below the bar
         played = _format_mmss(position_sec)
         total = _format_mmss(duration_sec)
