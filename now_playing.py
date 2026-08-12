@@ -209,7 +209,12 @@ def main():
 
     last_key = None
     last_frame = None
+    last_send_time = 0.0
     no_art_counter = 0
+    # Panel refresh interval: the AIO powers down the display if it sees
+    # no new data for ~1-2s, so we re-send the current frame every 100ms.
+    # (Cost: a single ~180KB JPEG every 100ms = ~1.8MB/s USB, trivial.)
+    REFRESH_INTERVAL_S = 0.1
 
     try:
         while True:
@@ -220,14 +225,29 @@ def main():
                 if last_key != "__idle__":
                     print(f"[{time.strftime('%H:%M:%S')}] no active media session")
                     last_key = "__idle__"
-                time.sleep(args.poll)
+                    last_frame = None
+                # Build a "no track" frame once, re-send it at REFRESH_INTERVAL_S
+                if last_frame is None:
+                    img = Image.new("RGB", (args.width, args.height), (10, 10, 14))
+                    d = ImageDraw.Draw(img)
+                    d.text((60, 60), "No media playing", fill=(120, 125, 135), font=_font(56))
+                    if args.rotate:
+                        img = img.rotate(-args.rotate, expand=True)
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=args.quality)
+                    last_frame = jpeg_to_frame(buf.getvalue(), *img.size)
+                now = time.monotonic()
+                if now - last_send_time >= REFRESH_INTERVAL_S:
+                    lcd.send_frame(last_frame)
+                    last_send_time = now
+                time.sleep(0.5)
                 continue
 
             title = info.title or ""
             artist = info.artist or ""
             key = f"{app_id}|{title}|{artist}"
 
-            # Only re-render when the track changes
+            # Build a new frame only when the track changes
             if key != last_key:
                 print(f"[{time.strftime('%H:%M:%S')}] {app_id}: {title} — {artist}")
                 last_key = key
@@ -235,7 +255,6 @@ def main():
                 if art is None:
                     no_art_counter += 1
                     print(f"  no artwork ({no_art_counter})")
-                    # Send a "no track art" panel so the display doesn't go stale
                     img = Image.new("RGB", (args.width, args.height), (10, 10, 14))
                     d = ImageDraw.Draw(img)
                     d.text((60, 60), title or "—", fill=(245, 245, 248), font=_font(72))
@@ -248,10 +267,14 @@ def main():
 
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=args.quality)
-                frame = buf.getvalue()
-                lcd.send_frame(jpeg_to_frame(frame, *img.size))
-                last_frame = frame
+                last_frame = jpeg_to_frame(buf.getvalue(), *img.size)
 
+            # Re-send the current frame at the panel refresh rate (keeps
+            # the AIO from powering down the display between track changes)
+            now = time.monotonic()
+            if now - last_send_time >= REFRESH_INTERVAL_S:
+                lcd.send_frame(last_frame)
+                last_send_time = now
             time.sleep(args.poll)
     except KeyboardInterrupt:
         print("\nStopping.")
