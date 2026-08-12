@@ -832,6 +832,9 @@ class LCDApp(tk.Tk):
         if job:
             self.after_cancel(job)
         self._brightness_cache_job = self.after(800, self._load_all_clips)
+        # Now-playing artwork: invalidate the base so the next poll re-bakes
+        # the new brightness (the poller rebuilds it on track-change logic)
+        self._np_base_jpeg = None
 
     def _playlist_start_item(self, idx: int):
         """Load + play one playlist item (single cycle, then advance)."""
@@ -1036,8 +1039,11 @@ class LCDApp(tk.Tk):
                     rotate = int(rot_s) if rot_s.isdigit() else 0
                     # Render the full frame only on track change; position
                     # ticks reuse the cheap _redraw_bar path (decode base
-                    # + bar strip, ~5ms vs ~50ms full render).
-                    if self._np_last_key == key and self._np_base_jpeg is not None:
+                    # + bar strip, ~5ms vs ~50ms full render). The base is
+                    # rebuilt when the track changes OR it was invalidated
+                    # (e.g. brightness changed mid-track).
+                    if (self._np_last_key == key
+                            and self._np_base_jpeg is not None):
                         img = _redraw_bar(
                             self._np_last_art, title, artist, w, h, rotate,
                             pos, dur, self._np_base_jpeg,
@@ -1047,12 +1053,19 @@ class LCDApp(tk.Tk):
                             self._np_last_art, title, artist, w, h, rotate,
                             pos, dur,
                         )
-                        # Cache the clean base (no bar) for the cheap path
+                        # Cache the clean base (no bar) for the cheap path.
+                        # Brightness is baked into the base (track-change
+                        # only, +2.9ms) so position ticks stay cheap —
+                        # _redraw_bar decodes the already-dimmed base.
                         buf = io.BytesIO()
                         base_img = render_now_playing(
                             self._np_last_art, title, artist, w, h, rotate,
                             0, 0, draw_bar=False,
                         )
+                        brightness = self.bright_var.get()
+                        if brightness < 100:
+                            from usblcd.frames import apply_brightness
+                            base_img = apply_brightness(base_img, brightness)
                         base_img.save(buf, format="JPEG", quality=92)
                         self._np_base_jpeg = buf.getvalue()
                     buf = io.BytesIO()
