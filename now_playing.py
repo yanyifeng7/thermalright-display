@@ -104,11 +104,14 @@ def render_now_playing(
     rotate: int = 0,
     position_sec: float = 0,
     duration_sec: float = 0,
+    draw_bar: bool = True,
 ) -> Image.Image:
     """Build the full 1600x720 now-playing image.
 
     position_sec / duration_sec drive the progress bar + mm:ss labels.
-    Pass 0 for either to hide the progress UI entirely.
+    Pass draw_bar=False to render the clean base frame (no progress UI) —
+    used as the backdrop that _redraw_bar() paints the bar onto, so the
+    background stays pristine (blurred art + veil) under the bar.
     """
     panel = Image.new("RGB", (width, height), (10, 10, 14))
     draw = ImageDraw.Draw(panel)
@@ -156,7 +159,7 @@ def render_now_playing(
     _draw_text(draw, (tx, ty + 100), artist, font_artist, fill=(180, 185, 195))
 
     # 4. Progress bar + mm:ss time labels (bottom-left of text area)
-    if duration_sec > 0:
+    if draw_bar and duration_sec > 0:
         bar_y = ty + 170
         bar_h = 10  # visible at this scale
         bar_w = max_text_w
@@ -222,16 +225,15 @@ def _draw_progress_bar(draw, bar_x, bar_y, bar_w, bar_h, position_sec, duration_
 
 def _redraw_bar(art, title, artist, width, height, rotate, position_sec, duration_sec,
                 base_jpeg_bytes):
-    """Cheap path: decode the last frame, clear + redraw only the bar strip,
-    return the updated image.
+    """Cheap path: decode the CLEAN base frame (no bar), draw only the
+    progress bar + time labels on it, return the updated image.
 
-    We un-rotate the decoded frame (back to pre-rotation orientation),
-    draw at pre-rotation coordinates, then re-rotate. Two rotations cost
-    ~10ms — still 5x cheaper than the full 52ms render.
-    """
+    The base is the pristine blurred-art backdrop, so the bar region
+    always shows the real background — no accumulation, no strip.
+    ~5ms vs ~50ms for a full render. We un-rotate, draw at pre-rotation
+    coordinates, then re-rotate."""
     import io as _io
     img = Image.open(_io.BytesIO(base_jpeg_bytes)).convert("RGB")
-    d = ImageDraw.Draw(img)
     font_time = _font(28)
 
     if rotate % 360 == 0:
@@ -244,12 +246,7 @@ def _redraw_bar(art, title, artist, width, height, rotate, position_sec, duratio
         img = img.rotate(rotate, expand=True)
 
     bx, by, bw, bh = _bar_geometry(width, height)
-    strip_h = bh + 45
     d = ImageDraw.Draw(img)
-    # Clear the strip to a dark color (blurred bg + veil area is dark
-    # enough that a solid near-black reads as the same backdrop)
-    d.rectangle([bx - 5, by - 5, bx + bw + 5, by + strip_h],
-                fill=(15, 16, 20))
     _draw_progress_bar(d, bx, by, bw, bh, position_sec, duration_sec,
                        font_time, 80)
 
@@ -403,6 +400,7 @@ def main():
     last_duration = 0.0
     _cached_art = None  # album art cached per track
     last_frame_bytes = None  # last JPEG bytes (for the cheap bar-redraw path)
+    _base_jpeg = None  # clean bar-less base frame (blurred art + veil)
 
     try:
         while True:
@@ -478,7 +476,9 @@ def main():
                 # Throttle the "new track" log so we don't spam on every rebuild
                 if track_changed:
                     print(f"[{time.strftime('%H:%M:%S')}] {app_id}: {title} — {artist}")
-                    # New track: full render + encode, save as base
+                    # New track: render the CLEAN base (no progress bar) once.
+                    # The bar is painted on top by _redraw_bar() on each tick,
+                    # keeping the blurred-art background pristine underneath.
                     art = _get_thumbnail_pil(info)
                     _cached_art = art
                     if art is None:
@@ -491,20 +491,27 @@ def main():
                         d.text((60, 160), artist, fill=(180, 185, 195), font=_font(40))
                         if args.rotate:
                             img = img.rotate(-args.rotate, expand=True)
+                        # no-art fallback: bar-less base
+                        _base_jpeg = None
                     else:
                         no_art_counter = 0
                         img = render_now_playing(art, title, artist, args.width, args.height,
-                                                 args.rotate, position_sec, duration_sec)
-                    _base_jpeg = None  # bar baked in; no base needed
-                else:
-                    art = _cached_art
-                    # Position tick: redraw only the bar strip on top of the
-                    # base frame (cheap path: decode 2ms + paste + encode 1ms
-                    # vs full render 52ms). The base is the previous frame
-                    # with the bar region cleared, so we never accumulate.
+                                                 args.rotate, 0, 0, draw_bar=False)
+                    # Encode the clean base once; the bar gets added per tick
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=args.quality)
+                    _base_jpeg = buf.getvalue()
+                    # Draw the bar at the current position on the base
                     img = _redraw_bar(art, title, artist, args.width, args.height,
                                       args.rotate, position_sec, duration_sec,
-                                      last_frame_bytes)
+                                      _base_jpeg)
+                else:
+                    art = _cached_art
+                    # Position tick: redraw the bar onto the CLEAN base
+                    # (pristine background every time — no strip accumulation)
+                    img = _redraw_bar(art, title, artist, args.width, args.height,
+                                      args.rotate, position_sec, duration_sec,
+                                      _base_jpeg)
 
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=args.quality)
