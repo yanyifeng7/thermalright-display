@@ -24,17 +24,19 @@ All future launches are instant — just double-click again.
 
 | Control | Purpose |
 |---|---|
-| **Files → Add File…** | add GIFs/themes/images to the list (playlist) |
+| **Files → Add File…** | add GIFs/.zt themes/images to the list (playlist) |
 | **Files list** | click to preview, double-click to play that one, Play runs the sequence |
 | **Resolution** | panel resolution (default 1600×720 for Thermalright Rainbow) |
 | **Rotation** | 0/90/180/270 — use **180°** if your panel is mounted upside-down |
 | **Scale** | Fit (letterbox) / Fill (crop) / Stretch (fill screen) |
 | **Brightness** | click the bar (0-100, click outside the ends for 0/100) |
-| **Frame rate** | 5-60 fps — only affects `.zt` themes (GIFs use their own timing) |
+| **Overlay font** | Normal / Large / X-Large text size for the monitor overlay |
 | **Monitor overlay** | draw live CPU/GPU temp + freq on the animation (see below) |
+| **Repeat** | loop the playlist forever (off = stop after the last item) |
 | **Connect / Play / Stop** | obvious 🙂 |
-| **Save Theme…** | saves current clip + settings into `themes/` |
-| **My Themes** | one-click load/delete of saved themes |
+
+> The playlist + all settings are saved automatically to `config.json` in
+> the project folder and restored on next launch — no manual saving.
 
 ## Optional: live CPU/GPU monitoring (LibreHardwareMonitor)
 

@@ -10,8 +10,10 @@ Verified end-to-end on a **Thermalright Rainbow** AIO (panel is a Somore "USBDIS
 - Animation playback ✅ (GIF and .zt themes at 24-60 fps)
 - Orientation control ✅ (panel mounts upside-down in some AIOs — use `--rotate 180`)
 - Brightness ✅ (0-100, software overlay — same method TRCC uses)
-- Theme save/load ✅ (settings persisted: rotation, scale, brightness, fps)
-- Live monitor overlay ✅ (CPU temp/freq + GPU temp/freq drawn on the animation, 4 corner positions, rotates with the frame)
+- **Playlist mode** ✅ (play multiple GIFs/themes in sequence, zero-pause switching, loop on/off)
+- **Auto-persist** ✅ (playlist + all display settings saved to `config.json`, restored on launch)
+- **Live monitor overlay** ✅ (CPU temp/freq + GPU temp/freq drawn on the animation, 4 corner positions, 3 font sizes, rotates with the frame)
+- **Dark UI** ✅ (modern dark theme, no more win95-era gray)
 
 ## Live monitoring overlay
 
@@ -45,6 +47,16 @@ That's it — the overlay picks up CPU temp/freq automatically when LHM is
 running, and degrades gracefully (CPU temp line disappears) when it isn't.
 LHM costs ~123 MB RAM and ~0.02 cores idle.
 
+### Overlay architecture (2026-08-11: sprite-based)
+
+The overlay is **sprite-based**: the text block (font, rotation, position
+baked) is rendered **once** per sensor change into a small RGBA image, and
+each displayed frame is `decode → paste sprite → encode`. No per-frame text
+drawing or rotation math. Stats are **always live** (rebuild on every visible
+text change — no staleness cap), because rebuilding the sprite is cheap.
+Overlay position + font size (Normal/Large/X-Large) are selectable and
+persisted.
+
 ## Performance: ~190× lighter than TRCC
 
 Measured live on the same hardware, same ff7 theme, same display (2026-08-10):
@@ -62,39 +74,35 @@ overhead); this tool pre-encodes frames once and only does USB writes.
 
 ### Monitor overlay CPU (live sensors on top of the animation)
 
-The GUI can overlay live **GPU temp / GPU freq / CPU freq** (see Monitor
-overlay checkbox). That adds re-encode work — measured on real GIFs
-(2026-08-10):
+Measured with the sprite-based overlay on real GIFs (2026-08-11):
 
 | Scenario | CPU | vs TRCC |
 |---|---|---|
-| GIF playback only (44-frame theme @ 24fps) | **0.002 cores (0.2%)** | ~193× less |
-| GIF + overlay (224-frame GIF @ 33fps) | **0.156 cores (15.6%)** | ~2.6× less |
-| GIF + overlay (100-frame GIF @ 17fps) | **0.171 cores (17.1%)** | ~2.4× less |
+| GIF playback only (44-frame theme @ 24fps) | **0.0008 cores (0.1%)** | ~500× less |
+| GIF + overlay (224-frame GIF @ 33fps, worst case) | **0.126 cores (12.6%)** | ~3.2× less |
+| GIF + overlay (44-frame GIF, live hardware) | **0.090 cores (9.0%)** | ~4.5× less |
 | TRCC full stack | 0.405 cores (40.5%) | — |
 
-Overlay cost scales with **update rate × frame count** (each sensor-text
-change re-encodes the animation cycle once — JPEG can't be partially
-re-encoded). The overlay updates at most every 2s and only when the
-visible text actually changes (CPU 2 decimals), so cost stays bounded
-while readings feel live.
+Overlay cost scales with **sensor-change rate × frame count** (each text
+change re-composites the animation cycle once — JPEG can't be partially
+re-encoded). The sprite design makes the per-frame work minimal, and frames
+are cached between changes (stable readings → near-zero CPU).
 
-### Playlist + preload CPU
+### Playlist CPU (load-all cache)
 
-Playlist mode (multiple GIFs/themes in sequence) uses background
-**preloading** of the next item for zero-pause switching. Measured on a
-5-GIF playlist (2026-08-10):
+Playlist mode encodes **every item once** into an in-memory cache at load
+time (~15 MB/clip; an 8-GIF playlist ≈ 123 MB — trivial on 32 GB). Switching
+between items is a **pure dict lookup**: zero-pause, zero re-encode, no
+background preload thread. Measured live (2026-08-11):
 
 | Config | CPU | vs TRCC |
 |---|---|---|
-| 5-GIF playlist, preload, no overlay | **0.188 cores (18.8%)** | ~2.2× less |
-| 5-GIF playlist, preload + overlay | **0.305 cores (30.5%)** | ~1.3× less |
-| 5-GIF playlist, sync-load + overlay (no preload) | 0.241 cores | ~1.7× less |
-| TRCC full stack | 0.405 cores (40.5%) | — |
+| **6-GIF playlist, loop on, playing** | **0.0039 cores (0.4%)** | ~100× less |
+| Single-GIF loop, brightness 45 | 0.0008 cores | ~500× less |
+| TRCC full stack (idle) | 0.405 cores | — |
 
-Preload's ~0.06-0.19-core cost is transient (the next item's encode runs
-while the current one plays, then stops). Single-item playback stays at
-the ~0.2%/0.17-core baselines above.
+Brightness changes rebuild the cache in the background (debounced 800 ms so
+slider drags don't spam); the currently-playing clip dims live instantly.
 
 ### Gotchas discovered (hardware-verified)
 1. **Every frame MUST be wrapped in the 64-byte PICTURE header** — raw JPEG gets silently ignored (display shows boot logo)
@@ -177,11 +185,15 @@ python gif_player.py --gif theme.zt --width 1600 --height 720 --rotate 180 --fps
 
 ```
 usblcd-display/
-├── usblcd/              # core protocol library
+├── usblcd/              # core library
 │   ├── device.py        # device discovery + USB transport
-│   ├── frames.py        # JPEG framing + RGB565 codecs
-│   └── protocol.py      # constants
+│   ├── frames.py        # JPEG framing, brightness, overlay sprite helpers
+│   ├── sensors.py       # sensor reads (LHM web server + NVML/psutil fallback)
+│   ├── ztfile.py        # .zt theme read (TRCC compatibility)
+│   └── theme.py         # dark UI palette + ttk styles
+├── usblcd_app.py        # GUI (playlist, preview, monitor overlay)
 ├── send_image.py        # CLI: send a single image
+├── gif_player.py        # CLI: play a GIF/theme
 ├── tests/               # unit tests
 └── docs/                # protocol notes
 ```
