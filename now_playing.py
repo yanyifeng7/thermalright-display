@@ -60,12 +60,20 @@ def _get_active_session():
             try:
                 info = _sync(session.try_get_media_properties_async(), timeout=2.0)
                 if info and (info.title or info.artist):
-                    return session, info, session.source_app_user_model_id
+                    # Read timeline (position / duration) for the progress bar
+                    tl = session.get_timeline_properties()
+                    try:
+                        duration_sec = (tl.end_time - tl.start_time).total_seconds()
+                        position_sec = (tl.position - tl.start_time).total_seconds()
+                    except Exception:
+                        duration_sec = position_sec = 0
+                    return (session, info, session.source_app_user_model_id,
+                            position_sec, duration_sec)
             except Exception:
                 continue
     except Exception:
         pass
-    return None, None, None
+    return None, None, None, 0, 0
 
 
 def _get_thumbnail_pil(info, max_size: int = 512) -> Optional[Image.Image]:
@@ -94,8 +102,14 @@ def render_now_playing(
     width: int = 1600,
     height: int = 720,
     rotate: int = 0,
+    position_sec: float = 0,
+    duration_sec: float = 0,
 ) -> Image.Image:
-    """Build the full 1600x720 now-playing image."""
+    """Build the full 1600x720 now-playing image.
+
+    position_sec / duration_sec drive the progress bar + mm:ss labels.
+    Pass 0 for either to hide the progress UI entirely.
+    """
     panel = Image.new("RGB", (width, height), (10, 10, 14))
     draw = ImageDraw.Draw(panel)
 
@@ -125,6 +139,7 @@ def render_now_playing(
     ty = ay + 30
     font_title = _font(72)
     font_artist = _font(40)
+    font_time = _font(28)
 
     # Truncate long titles to one line (limit to left half, beside the art)
     title = title.strip() if title else "—"
@@ -139,13 +154,45 @@ def render_now_playing(
 
     _draw_text(draw, (tx, ty), title, font_title, fill=(245, 245, 248))
     _draw_text(draw, (tx, ty + 100), artist, font_artist, fill=(180, 185, 195))
-    _draw_text(draw, (tx, ty + 170), "NOW PLAYING", _font(24), fill=(130, 140, 160))
 
-    # 4. Apply rotation (panel may be physically flipped)
+    # 4. Progress bar + mm:ss time labels (bottom-left of text area)
+    if duration_sec > 0:
+        bar_y = ty + 170
+        bar_h = 6
+        bar_w = max_text_w
+        # Background track
+        draw.rectangle([tx, bar_y, tx + bar_w, bar_y + bar_h],
+                       fill=(255, 255, 255, 30))
+        # Filled portion
+        ratio = max(0.0, min(1.0, position_sec / duration_sec))
+        fill_w = int(bar_w * ratio)
+        if fill_w > 0:
+            draw.rectangle([tx, bar_y, tx + fill_w, bar_y + bar_h],
+                           fill=(255, 255, 255, 220))
+        # mm:ss labels below the bar
+        played = _format_mmss(position_sec)
+        total = _format_mmss(duration_sec)
+        _draw_text(draw, (tx, bar_y + bar_h + 10),
+                   played, font_time, fill=(210, 215, 225))
+        # right-aligned total time
+        right = tx + bar_w
+        total_w = draw.textlength(total, font=font_time)
+        _draw_text(draw, (right - total_w, bar_y + bar_h + 10),
+                   total, font_time, fill=(210, 215, 225))
+
+    # 5. Apply rotation (panel may be physically flipped)
     if rotate:
         panel = panel.rotate(-rotate, expand=True)
 
     return panel
+
+
+def _format_mmss(seconds: float) -> str:
+    """Format seconds as mm:ss (or h:mm:ss for >1h tracks)."""
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
 def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Image.Image:
@@ -168,18 +215,18 @@ def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Imag
     return bg
 
 
-# Font chain. NotoSansSC-VF (Google Noto Sans SC, ships on Windows 11
-# 22H2+) is our primary — it covers Latin + Japanese + Chinese + Korean
-# with modern, well-hinted glyphs designed for screens. msgothic.ttc is
-# the fallback (slightly older / less pretty but always present).
-_FONT_PRIMARY = "NotoSansSC-VF.ttf"
+# Font chain. NotoSerifSC-VF (Google Noto Serif SC, ships on Windows 11
+# 22H2+) is our primary — elegant classical serif covering Latin +
+# Japanese + Chinese + Korean. msgothic.ttc is the fallback (always
+# present, slightly less refined).
+_FONT_PRIMARY = "NotoSerifSC-VF.ttf"
 _FONT_LATIN = "segoeui.ttf"
 _CJK_FONTS = (_FONT_PRIMARY, "msgothic.ttc", "msyh.ttc", "malgun.ttf", "simhei.ttf")
 
 
 def _font(px: int) -> ImageFont.FreeTypeFont:
-    """Primary font (Noto Sans SC VF): covers Latin + JP + CN + KR, ships
-    on Windows 11 22H2+. Beautiful screen-tuned glyphs."""
+    """Primary font (Noto Serif SC VF): elegant classical serif covering
+    Latin + JP + CN + KR. Ships on Windows 11 22H2+."""
     try:
         return ImageFont.truetype(_FONT_PRIMARY, px)
     except Exception:
@@ -255,7 +302,7 @@ def main():
 
     try:
         while True:
-            session, info, app_id = _get_active_session()
+            session, info, app_id, position_sec, duration_sec = _get_active_session()
 
             if info is None:
                 # No active media — show a calm "nothing playing" panel
@@ -282,16 +329,22 @@ def main():
 
             title = info.title or ""
             artist = info.artist or ""
-            key = f"{app_id}|{title}|{artist}"
+            track_key = f"{app_id}|{title}|{artist}"
+            # Position changes every second; rebuild when it shifts enough
+            # to be visible (every 1s on the bar — same as ~1mm:ss tick).
+            pos_key = int(position_sec) if duration_sec > 0 else 0
+            key = (track_key, pos_key)
 
-            # Build a new frame only when the track changes
+            # Build a new frame when the track changes OR every ~1s
             if key != last_key:
-                print(f"[{time.strftime('%H:%M:%S')}] {app_id}: {title} — {artist}")
+                if last_key is None or last_key[0] != track_key:
+                    print(f"[{time.strftime('%H:%M:%S')}] {app_id}: {title} — {artist}")
                 last_key = key
                 art = _get_thumbnail_pil(info)
                 if art is None:
                     no_art_counter += 1
-                    print(f"  no artwork ({no_art_counter})")
+                    if no_art_counter == 1:
+                        print(f"  no artwork ({no_art_counter})")
                     img = Image.new("RGB", (args.width, args.height), (10, 10, 14))
                     d = ImageDraw.Draw(img)
                     d.text((60, 60), title or "—", fill=(245, 245, 248), font=_font(72))
@@ -300,7 +353,8 @@ def main():
                         img = img.rotate(-args.rotate, expand=True)
                 else:
                     no_art_counter = 0
-                    img = render_now_playing(art, title, artist, args.width, args.height, args.rotate)
+                    img = render_now_playing(art, title, artist, args.width, args.height,
+                                             args.rotate, position_sec, duration_sec)
 
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=args.quality)
