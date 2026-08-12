@@ -14,7 +14,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from PIL import Image, ImageSequence
+from PIL import Image, ImageSequence, ImageTk
 
 from usblcd.device import USBLCD, LCDDeviceError
 from usblcd.frames import jpeg_to_frame
@@ -409,6 +409,15 @@ class LCDApp(tk.Tk):
             row=row, column=2, columnspan=2, sticky="w", pady=5)
 
         row += 1
+        self.np_auto_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(settings, text="Auto-display artwork (priority)",
+                        variable=self.np_auto_var,
+                        style="Dark.TCheckbutton").grid(
+            row=row, column=1, columnspan=3, sticky="w", pady=5)
+        # Auto-display drives the poller even when the tab isn't open
+        self.np_auto_var.trace_add("write", lambda *a: self._np_auto_changed())
+
+        row += 1
         ttk.Label(settings, text="Overlay pos:", style="Dark.TLabel").grid(
             row=row, column=0, sticky="w", padx=10, pady=5)
         self.overlay_pos_var = tk.StringVar(value=OVERLAY_POSITIONS[0])
@@ -428,11 +437,19 @@ class LCDApp(tk.Tk):
         for var in (self.res_var, self.rot_var, self.qual_var,
                     self.scale_var, self.bright_var, self.loop_var,
                     self.monitor_var, self.overlay_pos_var,
-                    self.overlay_font_var):
+                    self.overlay_font_var, self.np_auto_var):
             var.trace_add("write", self._schedule_config_save)
 
+        # Tabbed content: [Playlist] [Now Playing]
+        nb = ttk.Notebook(self, style="Dark.TNotebook")
+        nb.pack(fill="both", expand=True, **pad)
+
+        # ---------- Tab 1: Playlist ----------
+        tab_playlist = ttk.Frame(nb, style="Dark.TFrame")
+        nb.add(tab_playlist, text="  Playlist  ")
+
         # Preview
-        preview_frame = ttk.LabelFrame(self, text=" Preview ",
+        preview_frame = ttk.LabelFrame(tab_playlist, text=" Preview ",
                                        style="Dark.TLabelframe")
         preview_frame.pack(fill="x", **pad)
         self.preview_canvas = tk.Canvas(preview_frame, width=320, height=144,
@@ -452,7 +469,7 @@ class LCDApp(tk.Tk):
         self._draw_preview_placeholder("No preview")
 
         # Playlist panel — the single file selector (add, preview, play)
-        pl_frame = ttk.LabelFrame(self, text=" Files ",
+        pl_frame = ttk.LabelFrame(tab_playlist, text=" Files ",
                                   style="Dark.TLabelframe")
         pl_frame.pack(fill="x", **pad)
         pl_row = ttk.Frame(pl_frame, style="Dark.TFrame")
@@ -488,6 +505,64 @@ class LCDApp(tk.Tk):
         self._cache_brightness: int | None = None  # brightness of cached frames
         self._preload: tuple | None = None  # (legacy)
         self._preload_lock = threading.Lock()
+
+        # ---------- Tab 2: Now Playing ----------
+        tab_nowplaying = ttk.Frame(nb, style="Dark.TFrame")
+        nb.add(tab_nowplaying, text="  Now Playing  ")
+        self._tab_nowplaying = tab_nowplaying
+
+        self.np_art_canvas = tk.Canvas(tab_nowplaying, width=320, height=180,
+                                       bg=theme.PREVIEW_BG, highlightthickness=1,
+                                       highlightbackground=theme.BORDER)
+        self.np_art_canvas.pack(padx=8, pady=(8, 4))
+        self._np_art_photo = None
+        self._draw_np_placeholder("No media playing")
+
+        np_info = ttk.Frame(tab_nowplaying, style="Dark.TFrame")
+        np_info.pack(fill="x", padx=14)
+        self.np_title_label = tk.Label(np_info, text="—", font=(theme.FONT_BOLD, 13),
+                                       bg=theme.BG, fg=theme.TEXT, anchor="w")
+        self.np_title_label.pack(fill="x")
+        self.np_artist_label = tk.Label(np_info, text="", font=(theme.FONT, 10),
+                                        bg=theme.BG, fg=theme.TEXT_DIM, anchor="w")
+        self.np_artist_label.pack(fill="x")
+
+        np_progress = ttk.Frame(tab_nowplaying, style="Dark.TFrame")
+        np_progress.pack(fill="x", padx=14, pady=(10, 2))
+        self.np_progress = ttk.Progressbar(np_progress, mode="determinate",
+                                           style="Dark.Horizontal.TProgressbar")
+        self.np_progress.pack(fill="x")
+        np_time_row = ttk.Frame(tab_nowplaying, style="Dark.TFrame")
+        np_time_row.pack(fill="x", padx=14)
+        self.np_time_label = tk.Label(np_time_row, text="0:00 / 0:00",
+                                      font=(theme.FONT, 9),
+                                      bg=theme.BG, fg=theme.TEXT_DIM, anchor="w")
+        self.np_time_label.pack(fill="x")
+
+        np_hint = tk.Label(tab_nowplaying,
+                           text="Shows the track currently playing in Apple Music,\n"
+                                "Spotify or any app that registers with Windows\n"
+                                "media controls. Album art + progress mirror the AIO.\n\n"
+                                "Auto-display artwork lives in Display settings: when\n"
+                                "checked, artwork takes priority over the playlist.",
+                           font=(theme.FONT, 9), bg=theme.BG, fg=theme.TEXT_DIM,
+                           justify="left")
+        np_hint.pack(anchor="w", padx=14, pady=(10, 6))
+
+        # Now-playing poller (runs only while this tab is active)
+        self._np_active = False
+        self._np_poll_job: str | None = None
+        self._np_keepalive_job: str | None = None
+        self._np_last_key = None
+        self._np_last_art: Image.Image | None = None
+        self._np_last_frame: bytes | None = None  # last JPEG frame sent to AIO
+
+        nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # Guard: the notebook fires this event during construction (when the
+        # second tab is added it becomes selected). Ignore that first event
+        # so the poller only starts when the user actually clicks the tab.
+        self._nb_ready = False
+        self.after(50, self._nb_ready_set)
 
         # Status
         status_frame = ttk.Frame(self, style="Dark.TFrame")
@@ -719,7 +794,12 @@ class LCDApp(tk.Tk):
                     self._clip_cache[path] = (frames, delays, own_zt, meta)
                     if i == 0 and not self.file_path:
                         # First clip becomes the selected file for preview
-                        self.after(0, lambda p=path: self._playlist_on_select(p))
+                        def _select_first():
+                            if self.playlist_list.size() > 0:
+                                self.playlist_list.selection_clear(0, tk.END)
+                                self.playlist_list.selection_set(0)
+                                self._playlist_on_select()
+                        self.after(0, _select_first)
                 except Exception:
                     pass
 
@@ -840,6 +920,186 @@ class LCDApp(tk.Tk):
         self.preview_canvas.create_text(
             160, 72, text=text, fill="#666", font=("Segoe UI", 10)
         )
+
+    # ---------- Now Playing tab ----------
+
+    def _draw_np_placeholder(self, text: str):
+        self.np_art_canvas.delete("all")
+        self.np_art_canvas.create_text(
+            160, 90, text=text, fill="#666", font=("Segoe UI", 10)
+        )
+
+    def _nb_ready_set(self):
+        self._nb_ready = True
+
+    def _on_tab_changed(self, event=None):
+        if not getattr(self, "_nb_ready", False):
+            return  # construction-time event; ignore
+        nb = event.widget
+        # tab identity via index: 0 = Playlist, 1 = Now Playing
+        try:
+            idx = nb.index(nb.select())
+        except Exception:
+            idx = 0
+        self._np_active = (idx == 1)
+        if self._np_poll_job:
+            self.after_cancel(self._np_poll_job)
+            self._np_poll_job = None
+        if self._np_active:
+            self._np_poll_job = self.after(500, self._np_poll_once)
+        else:
+            self._set_np_idle()
+            self._np_poll_job = None
+            # Artwork no longer has priority (unless auto is checked —
+            # then keepalive continues; _np_keepalive checks that)
+            if not self.np_auto_var.get() and self._np_keepalive_job:
+                self.after_cancel(self._np_keepalive_job)
+                self._np_keepalive_job = None
+
+    def _np_auto_changed(self):
+        """Auto-display toggled. When checked, start the poller so artwork
+        streams to the AIO regardless of the active tab."""
+        if self.np_auto_var.get() and self.lcd is not None:
+            if self._np_poll_job is None:
+                self._np_poll_job = self.after(200, self._np_poll_once)
+        else:
+            # Auto off: if the tab isn't active, stop the artwork stream
+            if not self._np_active and self._np_keepalive_job:
+                self.after_cancel(self._np_keepalive_job)
+                self._np_keepalive_job = None
+
+    def _np_poll_once(self):
+        """Poll GSMTC; update the Now Playing tab + optionally the AIO."""
+        self._np_poll_job = None
+        # Run while the tab is open OR auto-display wants artwork priority
+        if not self._np_active and not self.np_auto_var.get():
+            return
+        try:
+            from now_playing import (
+                _get_active_session,
+                _get_thumbnail_pil,
+                _format_mmss,
+                render_now_playing,
+                _redraw_bar,
+            )
+            session, info, app_id, pos, dur = _get_active_session()
+            if info is None or not info.title:
+                self._set_np_idle()
+                # Auto-fallback: AIO shows the playlist
+                self._np_active = False
+                if self.player is None and self.frames:
+                    # resume playlist? just stop the now-playing stream
+                    pass
+                self._np_poll_job = self.after(2000, self._np_poll_once)
+                return
+
+            title = info.title or ""
+            artist = info.artist or ""
+            key = f"{app_id}|{title}|{artist}"
+
+            # Art refresh (only when the track changed)
+            if key != self._np_last_key:
+                self._np_last_key = key
+                # winsdk's async thumbnail open fails under tkinter's
+                # single-threaded mainloop (WinError -2147483634). Fetch
+                # the art on a background thread and deliver the PIL image
+                # back to the UI thread via after().
+                def fetch_art():
+                    try:
+                        art = _get_thumbnail_pil(info)
+                    except Exception:
+                        art = None
+                    self.after(0, lambda a=art: self._np_art_ready(key, a))
+                threading.Thread(target=fetch_art, daemon=True).start()
+
+            # Text + progress (every poll)
+            self.np_title_label.config(text=title)
+            self.np_artist_label.config(text=artist)
+            if dur > 0:
+                self.np_progress.config(maximum=dur, value=min(pos, dur))
+                self.np_time_label.config(
+                    text=f"{_format_mmss(pos)} / {_format_mmss(dur)}"
+                )
+            else:
+                self.np_progress.config(maximum=100, value=0)
+                self.np_time_label.config(text="")
+
+            # Mirror to the AIO (now-playing render) if connected.
+            # Priority: auto-display checked OR now-playing tab active.
+            want_art = self.np_auto_var.get() or self._np_active
+            if self.lcd is not None and want_art and self._np_last_art is not None:
+                try:
+                    w, h = 1600, 720
+                    # Rot values come as "180°" — strip the degree symbol
+                    rot_s = str(self.rot_var.get()).replace("°", "").strip()
+                    rotate = int(rot_s) if rot_s.isdigit() else 0
+                    if self._np_last_key == key:
+                        img = render_now_playing(
+                            self._np_last_art, title, artist, w, h, rotate,
+                            pos, dur,
+                        )
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=92)
+                        self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
+                        self.lcd.send_frame(self._np_last_frame)
+                        # Keepalive: re-send every 100ms so the AIO stays lit.
+                        # If we're the active stream, the player is stopped;
+                        # schedule the re-send loop.
+                        if self._np_keepalive_job is None:
+                            self._np_keepalive_job = self.after(
+                                100, self._np_keepalive)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._np_poll_job = self.after(1000, self._np_poll_once)
+
+    def _np_keepalive(self):
+        """Re-send the last now-playing frame every 100ms so the AIO panel
+        doesn't power down between polls."""
+        self._np_keepalive_job = None
+        if not (self.np_auto_var.get() or self._np_active):
+            return  # artwork no longer has priority
+        if self.lcd is not None and self._np_last_frame is not None:
+            try:
+                self.lcd.send_frame(self._np_last_frame)
+            except Exception:
+                pass
+            self._np_keepalive_job = self.after(100, self._np_keepalive)
+
+    def _np_art_ready(self, key, art):
+        """Called on the UI thread when the background art fetch completes."""
+        if key != self._np_last_key:
+            return  # track changed since; stale
+        self._np_last_art = art
+        if art is not None:
+            thumb = art.copy()
+            thumb.thumbnail((300, 170))
+            self._np_art_photo = ImageTk.PhotoImage(thumb)
+            self.np_art_canvas.delete("all")
+            self.np_art_canvas.create_image(160, 90, image=self._np_art_photo)
+        else:
+            self._draw_np_placeholder("No artwork")
+
+    def _set_np_idle(self):
+        self.np_title_label.config(text="—")
+        self.np_artist_label.config(text="")
+        self.np_progress.config(maximum=100, value=0)
+        self.np_time_label.config(text="0:00 / 0:00")
+        self._draw_np_placeholder("No media playing")
+        self._np_last_key = None
+        self._np_last_art = None
+        if self._np_keepalive_job:
+            self.after_cancel(self._np_keepalive_job)
+            self._np_keepalive_job = None
+
+    def _on_close_np(self):
+        if self._np_poll_job:
+            self.after_cancel(self._np_poll_job)
+            self._np_poll_job = None
+        if self._np_keepalive_job:
+            self.after_cancel(self._np_keepalive_job)
+            self._np_keepalive_job = None
 
     def _load_preview(self, path: str):
         """Open source once; render frames at preview scale."""
@@ -1218,6 +1478,10 @@ class LCDApp(tk.Tk):
             self.connect_btn.config(text="Disconnect")
             self.play_btn.config(state="normal")
             self._set_status(f"Connected: {DEVICE_LABEL}", "#1a8a3a")
+            # Auto-display artwork: start the now-playing poller so the AIO
+            # shows album art immediately (no tab click needed).
+            if self.np_auto_var.get() and self._np_poll_job is None:
+                self._np_poll_job = self.after(200, self._np_poll_once)
         except Exception as e:
             self._set_status(f"Connect failed: {e}", "#c0392b")
 
@@ -1229,6 +1493,13 @@ class LCDApp(tk.Tk):
             except Exception:
                 pass
             self.lcd = None
+        # Stop the now-playing stream (poller + keepalive)
+        if self._np_poll_job:
+            self.after_cancel(self._np_poll_job)
+            self._np_poll_job = None
+        if self._np_keepalive_job:
+            self.after_cancel(self._np_keepalive_job)
+            self._np_keepalive_job = None
         self.connect_btn.config(text="Connect")
         self.play_btn.config(state="disabled")
         self._set_status("Disconnected", "#888")
@@ -1239,6 +1510,15 @@ class LCDApp(tk.Tk):
             return
         if self.lcd is None:
             self._set_status("Connect first", "#c0392b")
+            return
+
+        # Auto-display artwork priority: if checked and we have a track +
+        # artwork, Play shows the now-playing stream instead of the playlist.
+        if self.np_auto_var.get() and self._np_last_art is not None:
+            self._set_status("Showing now-playing artwork", "#1a6fb0")
+            # Ensure the np poller is streaming to the AIO
+            if self._np_poll_job is None:
+                self._np_poll_job = self.after(200, self._np_poll_once)
             return
 
         # Playlist mode: play items in order, one cycle each
@@ -1319,6 +1599,7 @@ class LCDApp(tk.Tk):
         self._save_config()
         self._stop_preview()
         self._stop_play()
+        self._on_close_np()
         if self.lcd is not None:
             try:
                 self.lcd.close()
@@ -1350,6 +1631,7 @@ class LCDApp(tk.Tk):
                 "brightness": self.bright_var.get(),
                 "loop": self.loop_var.get(),
                 "monitor": self.monitor_var.get(),
+                "auto_art": self.np_auto_var.get(),
                 "overlay_pos": self.overlay_pos_var.get(),
                 "overlay_font": self.overlay_font_var.get(),
             },
@@ -1377,6 +1659,7 @@ class LCDApp(tk.Tk):
         self.bright_var.set(s.get("brightness", self.bright_var.get()))
         self.loop_var.set(s.get("loop", self.loop_var.get()))
         self.monitor_var.set(s.get("monitor", self.monitor_var.get()))
+        self.np_auto_var.set(s.get("auto_art", self.np_auto_var.get()))
         self.overlay_pos_var.set(s.get("overlay_pos", self.overlay_pos_var.get()))
         self.overlay_font_var.set(
             s.get("overlay_font", self.overlay_font_var.get())
