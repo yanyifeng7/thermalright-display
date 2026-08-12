@@ -168,16 +168,18 @@ def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Imag
     return bg
 
 
-# Font chain. msgothic.ttc (MS Gothic, ships on every Windows) covers
-# Latin + Japanese + basic Chinese — it's our primary. We fall back to
-# segoeui only for non-CJK fonts (slightly tighter Latin metrics).
-_FONT_PRIMARY = "msgothic.ttc"
+# Font chain. NotoSansSC-VF (Google Noto Sans SC, ships on Windows 11
+# 22H2+) is our primary — it covers Latin + Japanese + Chinese + Korean
+# with modern, well-hinted glyphs designed for screens. msgothic.ttc is
+# the fallback (slightly older / less pretty but always present).
+_FONT_PRIMARY = "NotoSansSC-VF.ttf"
 _FONT_LATIN = "segoeui.ttf"
-_CJK_FONTS = (_FONT_PRIMARY, "msyh.ttc", "malgun.ttf", "simhei.ttf")
+_CJK_FONTS = (_FONT_PRIMARY, "msgothic.ttc", "msyh.ttc", "malgun.ttf", "simhei.ttf")
 
 
 def _font(px: int) -> ImageFont.FreeTypeFont:
-    """Primary font (msgothic.ttc): covers Latin + JP + CN, ships with Windows."""
+    """Primary font (Noto Sans SC VF): covers Latin + JP + CN + KR, ships
+    on Windows 11 22H2+. Beautiful screen-tuned glyphs."""
     try:
         return ImageFont.truetype(_FONT_PRIMARY, px)
     except Exception:
