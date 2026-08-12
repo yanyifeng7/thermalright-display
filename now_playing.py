@@ -168,75 +168,46 @@ def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Imag
     return bg
 
 
-# CJK font fallback chain (Windows ships these by default).
-# segoeui.ttf = Latin (primary); msgothic.ttc = Japanese; msyh.ttc = Chinese;
-# malgun.ttf = Korean. The first font whose font_variant() covers the
-# given text is used; missing glyphs fall through automatically.
-_CJK_FONTS = ("segoeui.ttf", "msgothic.ttc", "msyh.ttc", "malgun.ttf", "simhei.ttf")
+# Font chain. msgothic.ttc (MS Gothic, ships on every Windows) covers
+# Latin + Japanese + basic Chinese — it's our primary. We fall back to
+# segoeui only for non-CJK fonts (slightly tighter Latin metrics).
+_FONT_PRIMARY = "msgothic.ttc"
+_FONT_LATIN = "segoeui.ttf"
+_CJK_FONTS = (_FONT_PRIMARY, "msyh.ttc", "malgun.ttf", "simhei.ttf")
 
 
 def _font(px: int) -> ImageFont.FreeTypeFont:
-    """Primary Latin font (segoeui). Use this for ASCII text."""
+    """Primary font (msgothic.ttc): covers Latin + JP + CN, ships with Windows."""
     try:
-        return ImageFont.truetype("segoeui.ttf", px)
+        return ImageFont.truetype(_FONT_PRIMARY, px)
     except Exception:
         return ImageFont.load_default()
 
 
+def _latin_font(px: int) -> ImageFont.FreeTypeFont:
+    """Latin-only font (segoeui): tighter Latin metrics than msgothic."""
+    try:
+        return ImageFont.truetype(_FONT_LATIN, px)
+    except Exception:
+        return _font(px)
+
+
 def _draw_text(draw, pos, text, font, fill, anchor=None):
-    """Draw text with CJK fallback — auto-switch font per character range
-    so Japanese / Chinese / Korean render correctly."""
+    """Draw text using the given font.
+
+    We don't do per-character font picking anymore — it doesn't work
+    reliably through PIL's Python API (missing glyphs render as .notdef
+    boxes that look like valid glyphs to getmask/getbbox). Instead, the
+    caller passes the right font: _font() for general use (covers most
+    CJK + Latin), _latin_font() for pure-ASCII labels where tighter
+    Latin metrics matter.
+    """
     if not text:
         return
-    try:
-        # Try the primary font first; if it covers everything, skip the fallback
-        # (faster path for ASCII-only text — the common case).
-        mask = font.getmask(text)
-        x, y = pos
-        if anchor:
-            draw.text((x, y), text, fill=fill, font=font, anchor=anchor)
-        else:
-            draw.text((x, y), text, fill=fill, font=font)
-        return
-    except Exception:
-        pass
-    # Fallback: build per-character font picks. For each char, pick the
-    # first font in our chain that covers it. This is rare (only hits
-    # when the primary font fails) so we don't worry about speed.
-    # Group consecutive chars by font to minimize draw.text calls.
-    groups = []  # [(font_obj, "substring")]
-    cur_font = None
-    cur_chars = []
-    for ch in text:
-        chosen = None
-        for fname in _CJK_FONTS:
-            try:
-                f = ImageFont.truetype(fname, font.size)
-                # getmask() raises if the glyph is missing
-                f.getmask(ch)
-                chosen = f
-                break
-            except Exception:
-                continue
-        if chosen is None:
-            chosen = font  # last resort: paint boxes
-        if chosen is cur_font:
-            cur_chars.append(ch)
-        else:
-            if cur_font is not None:
-                groups.append((cur_font, "".join(cur_chars)))
-            cur_font = chosen
-            cur_chars = [ch]
-    if cur_font is not None:
-        groups.append((cur_font, "".join(cur_chars)))
-    x, y = pos
-    for f, s in groups:
-        draw.text((x, y), s, fill=fill, font=f)
-        # advance x by the rendered width
-        try:
-            x += int(f.getlength(s))
-        except Exception:
-            pass
+    if anchor:
+        draw.text(pos, text, fill=fill, font=font, anchor=anchor)
+    else:
+        draw.text(pos, text, fill=fill, font=font)
 
 
 # ---------- Main loop ---------- #
