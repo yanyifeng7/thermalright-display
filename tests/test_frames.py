@@ -1,40 +1,120 @@
+"""Unit tests for usblcd.frames: brightness, sprite, framing."""
+from __future__ import annotations
+
+import io
+
+import pytest
 from PIL import Image
-from usblcd.frames import image_to_rgb565, rgb565_to_image, bgr_to_rgb565
 
-# TRCC layout check: hi = G[7:5]|B[7:3], lo = R[7:3]|G[7:5]
-# red   (r=255,g=0,b=0): hi = 0 + 0 = 0x00, lo = 0xF8 + 0 = 0xF8
-# blue  (r=0,g=0,b=255): hi = 0 + 31 = 0x1F, lo = 0 + 0 = 0x00
-# green (r=0,g=255,b=0): hi = 0xE0 + 0 = 0xE0, lo = 0 + 7 = 0x07
-hi, lo = bgr_to_rgb565(0, 0, 255)
-assert (hi, lo) == (0x00, 0xF8), f"red expected (0x00,0xF8) got ({hi:02X},{lo:02X})"
-print("red  -> bytes 00 F8  OK")
+from usblcd.frames import apply_brightness, build_overlay_sprite, jpeg_to_frame
 
-hi, lo = bgr_to_rgb565(255, 0, 0)
-assert (hi, lo) == (0x1F, 0x00), f"blue expected (0x1F,0x00) got ({hi:02X},{lo:02X})"
-print("blue -> bytes 1F 00  OK")
 
-hi, lo = bgr_to_rgb565(0, 255, 0)
-assert (hi, lo) == (0xE0, 0x07), f"green expected (0xE0,0x07) got ({hi:02X},{lo:02X})"
-print("green-> bytes E0 07  OK")
+# ---------- apply_brightness ----------
 
-# Round trip: decode(encode(x)) should reconstruct channels within RGB565 tolerance
-colors = {
-    "red":   (255, 0, 0),
-    "green": (0, 255, 0),
-    "blue":  (0, 0, 255),
-    "white": (255, 255, 255),
-    "black": (0, 0, 0),
-    "gray":  (128, 128, 128),
-}
-max_err = 0
-for name, (r, g, b) in colors.items():
-    img = Image.new("RGB", (4, 4), (r, g, b))
-    data = image_to_rgb565(img)
-    back = rgb565_to_image(data, 4, 4)
-    got = back.getpixel((0, 0))
-    err = max(abs(got[i] - (r, g, b)[i]) for i in range(3))
-    max_err = max(max_err, err)
-    print(f"{name:6} in=({r:3},{g:3},{b:3}) out=({got[0]:3},{got[1]:3},{got[2]:3}) err={err}")
+def test_brightness_100_noop():
+    img = Image.new("RGB", (100, 50), (120, 100, 80))
+    out = apply_brightness(img, 100)
+    assert out is img  # fast path returns the same object
 
-assert max_err <= 40, f"round-trip error too large: {max_err}"
-print(f"\nAll checks passed. Max round-trip error: {max_err}")
+
+def test_brightness_0_black():
+    img = Image.new("RGB", (100, 50), (120, 100, 80))
+    out = apply_brightness(img, 0)
+    assert out.getpixel((50, 25)) == (0, 0, 0)
+
+
+def test_brightness_50_halfway():
+    img = Image.new("RGB", (100, 50), (200, 100, 0))
+    out = apply_brightness(img, 50)
+    px = out.getpixel((50, 25))
+    assert abs(px[0] - 100) <= 1  # 200 -> ~100
+    assert abs(px[1] - 50) <= 1   # 100 -> ~50
+
+
+def test_brightness_preserves_size_and_mode():
+    img = Image.new("RGB", (1600, 720), (120, 100, 80))
+    out = apply_brightness(img, 30)
+    assert out.size == (1600, 720)
+    assert out.mode == "RGB"
+
+
+# ---------- build_overlay_sprite ----------
+
+def test_sprite_all_sensors(readings):
+    sprite = build_overlay_sprite(readings, 1600, 720, rotate=180,
+                                  position="bottom-right", font_scale=1.0)
+    assert sprite is not None
+    block, pos = sprite
+    assert block.mode == "RGBA"
+    # 4 lines of text -> block taller than wide-ish
+    assert block.width > 100
+    assert block.height > 60
+    # Position must be within the frame
+    assert 0 <= pos[0] < 1600
+    assert 0 <= pos[1] < 720
+
+
+def test_sprite_no_sensors():
+    class Empty:
+        cpu_freq_mhz = None
+        cpu_temp_c = None
+        gpu_freq_mhz = None
+        gpu_temp_c = None
+
+    assert build_overlay_sprite(Empty(), 1600, 720) is None
+
+
+def test_sprite_all_positions_in_bounds(readings):
+    for pos_name in ("top-left", "top-right", "bottom-left", "bottom-right"):
+        sprite = build_overlay_sprite(readings, 1600, 720, rotate=180,
+                                      position=pos_name, font_scale=1.0)
+        assert sprite is not None, pos_name
+        block, pos = sprite
+        assert 0 <= pos[0] <= 1600 - block.width, pos_name
+        assert 0 <= pos[1] <= 720 - block.height, pos_name
+
+
+def test_sprite_rotations_in_bounds(readings):
+    for rot in (0, 90, 180, 270):
+        sprite = build_overlay_sprite(readings, 1600, 720, rotate=rot,
+                                      position="bottom-right", font_scale=1.0)
+        assert sprite is not None, rot
+        block, pos = sprite
+        assert 0 <= pos[0] <= 1600 - block.width, rot
+        assert 0 <= pos[1] <= 720 - block.height, rot
+
+
+def test_sprite_pastes_with_alpha(readings):
+    """Pasting the sprite onto a frame must not raise and must cover."""
+    from now_playing import render_now_playing
+
+    art = Image.new("RGB", (600, 600), (80, 80, 180))
+    img = render_now_playing(art, "Sample", "Artist", 1600, 720, 180, 100, 240)
+    sprite = build_overlay_sprite(readings, 1600, 720, rotate=180,
+                                  position="top-left", font_scale=1.0)
+    block, pos = sprite
+    img.paste(block, pos, block)
+    # A pixel inside the block region should be darker than the pure art
+    # (the semi-transparent black backing).
+    px = img.getpixel((pos[0] + 5, pos[1] + 5))
+    assert sum(px) < 3 * 200
+
+
+# ---------- jpeg_to_frame ----------
+
+def test_jpeg_to_frame_header(jpeg_bytes):
+    frame = jpeg_to_frame(jpeg_bytes, 1600, 720)
+    # 64-byte header + payload
+    assert len(frame) == 64 + len(jpeg_bytes)
+    assert frame[:4] == b"\x12\x34\x56\x78"  # magic
+    assert frame[4:8] == b"\x02\x00\x00\x00"  # PICTURE command
+    # width/height LE
+    assert frame[8:12] == (1600).to_bytes(4, "little")
+    assert frame[12:16] == (720).to_bytes(4, "little")
+    # JPEG length at bytes 60-63
+    assert frame[60:64] == len(jpeg_bytes).to_bytes(4, "little")
+
+
+def test_jpeg_to_frame_payload_roundtrip(jpeg_bytes):
+    frame = jpeg_to_frame(jpeg_bytes, 1600, 720)
+    assert frame[64:] == jpeg_bytes

@@ -249,6 +249,31 @@ usblcd-display/
 └── docs/                # protocol notes
 ```
 
+## Testing
+
+Unit + integration tests run headless (no USB display needed) — they mock
+GSMTC (media session) and LibreHardwareMonitor:
+
+```bash
+.venv\Scripts\python -m pytest            # 28 tests, ~6s
+```
+
+Coverage:
+- `frames.py`: brightness math, sprite geometry (all 4 corners × 4 rotations
+  in-bounds), 64-byte header framing
+- `now_playing.py`: mm:ss formatting, CJK rendering, progress-bar visibility,
+  rotation handling, **bar-strip redraw matches full render** (regression:
+  black-strip bug), no-black-strip guarantee
+- GUI poller (with fake session + fake LCD): rotation `180°` parse (regression:
+  `int("180°")` crash), artwork frame actually sent, auto-display priority
+  blocks GIF play, brightness invalidates the base cache
+
+Hardware e2e (opt-in, real display plugged in):
+
+```bash
+.venv\Scripts\python -m pytest tests/test_e2e.py --hardware
+```
+
 ## License
 
 MIT
