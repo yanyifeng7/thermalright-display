@@ -158,17 +158,17 @@ def render_now_playing(
     # 4. Progress bar + mm:ss time labels (bottom-left of text area)
     if duration_sec > 0:
         bar_y = ty + 170
-        bar_h = 6
+        bar_h = 10  # visible at this scale
         bar_w = max_text_w
-        # Background track
+        # Background track (dim white — panel is RGB, no alpha channel)
         draw.rectangle([tx, bar_y, tx + bar_w, bar_y + bar_h],
-                       fill=(255, 255, 255, 30))
-        # Filled portion
+                       fill=(90, 95, 110))
+        # Filled portion — accent color so it stands out from the track
         ratio = max(0.0, min(1.0, position_sec / duration_sec))
-        fill_w = int(bar_w * ratio)
+        fill_w = max(1, int(bar_w * ratio)) if ratio > 0 else 0
         if fill_w > 0:
             draw.rectangle([tx, bar_y, tx + fill_w, bar_y + bar_h],
-                           fill=(255, 255, 255, 220))
+                           fill=(95, 195, 230))  # bright cyan accent
         # mm:ss labels below the bar
         played = _format_mmss(position_sec)
         total = _format_mmss(duration_sec)
