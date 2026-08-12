@@ -970,33 +970,37 @@ class LCDApp(tk.Tk):
             if self.lcd is not None and want_art and self._np_last_art is not None:
                 w, h = 1600, 720
                 # Monitor overlay: poll sensors + rebuild the sprite when the
-                # visible text changes (same staleness logic as the GIF overlay)
+                # visible text changes. Sensors are polled every 2s (they
+                # change ~0.7x/sec anyway) to avoid bursty CPU spikes.
                 if self.monitor_var.get():
-                    try:
-                        if self._np_sensor is None:
-                            from usblcd.sensors import SensorMonitor
-                            self._np_sensor = SensorMonitor()
-                        r = self._np_sensor.read()
-                        text = (
-                            f"{r.cpu_freq_mhz/1000:.2f}" if r.cpu_freq_mhz else "-",
-                            f"{r.cpu_temp_c:.0f}" if r.cpu_temp_c else "-",
-                            f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
-                            f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
-                            self.overlay_pos_var.get(),
-                            self.overlay_font_var.get(),
-                        )
-                        if text != self._np_sprite_text:
-                            self._np_sprite_text = text
-                            from usblcd.frames import build_overlay_sprite
-                            rot_s = str(self.rot_var.get()).replace("°", "").strip()
-                            rotate = int(rot_s) if rot_s.isdigit() else 0
-                            self._np_sprite = build_overlay_sprite(
-                                r, w, h, rotate,
+                    now = time.monotonic()
+                    if now - getattr(self, "_np_sensor_last", 0) >= 2.0:
+                        self._np_sensor_last = now
+                        try:
+                            if self._np_sensor is None:
+                                from usblcd.sensors import SensorMonitor
+                                self._np_sensor = SensorMonitor()
+                            r = self._np_sensor.read()
+                            text = (
+                                f"{r.cpu_freq_mhz/1000:.2f}" if r.cpu_freq_mhz else "-",
+                                f"{r.cpu_temp_c:.0f}" if r.cpu_temp_c else "-",
+                                f"{round(r.gpu_freq_mhz/50)*50}" if r.gpu_freq_mhz else "-",
+                                f"{r.gpu_temp_c:.0f}" if r.gpu_temp_c else "-",
                                 self.overlay_pos_var.get(),
-                                OVERLAY_FONT_SCALE.get(self.overlay_font_var.get(), 1.0),
+                                self.overlay_font_var.get(),
                             )
-                    except Exception:
-                        pass
+                            if text != self._np_sprite_text:
+                                self._np_sprite_text = text
+                                from usblcd.frames import build_overlay_sprite
+                                rot_s = str(self.rot_var.get()).replace("°", "").strip()
+                                rotate = int(rot_s) if rot_s.isdigit() else 0
+                                self._np_sprite = build_overlay_sprite(
+                                    r, w, h, rotate,
+                                    self.overlay_pos_var.get(),
+                                    OVERLAY_FONT_SCALE.get(self.overlay_font_var.get(), 1.0),
+                                )
+                        except Exception:
+                            pass
                 try:
                     # Rot values come as "180°" — strip the degree symbol
                     rot_s = str(self.rot_var.get()).replace("°", "").strip()
