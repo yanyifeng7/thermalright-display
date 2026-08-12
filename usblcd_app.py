@@ -556,6 +556,7 @@ class LCDApp(tk.Tk):
         self._np_last_key = None
         self._np_last_art: Image.Image | None = None
         self._np_last_frame: bytes | None = None  # last JPEG frame sent to AIO
+        self._np_base_jpeg: bytes | None = None  # clean bar-less base frame
 
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         # Guard: the notebook fires this event during construction (when the
@@ -1033,21 +1034,37 @@ class LCDApp(tk.Tk):
                     # Rot values come as "180°" — strip the degree symbol
                     rot_s = str(self.rot_var.get()).replace("°", "").strip()
                     rotate = int(rot_s) if rot_s.isdigit() else 0
-                    if self._np_last_key == key:
+                    # Render the full frame only on track change; position
+                    # ticks reuse the cheap _redraw_bar path (decode base
+                    # + bar strip, ~5ms vs ~50ms full render).
+                    if self._np_last_key == key and self._np_base_jpeg is not None:
+                        img = _redraw_bar(
+                            self._np_last_art, title, artist, w, h, rotate,
+                            pos, dur, self._np_base_jpeg,
+                        )
+                    else:
                         img = render_now_playing(
                             self._np_last_art, title, artist, w, h, rotate,
                             pos, dur,
                         )
+                        # Cache the clean base (no bar) for the cheap path
                         buf = io.BytesIO()
-                        img.save(buf, format="JPEG", quality=92)
-                        self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
-                        self.lcd.send_frame(self._np_last_frame)
-                        # Keepalive: re-send every 100ms so the AIO stays lit.
-                        # If we're the active stream, the player is stopped;
-                        # schedule the re-send loop.
-                        if self._np_keepalive_job is None:
-                            self._np_keepalive_job = self.after(
-                                100, self._np_keepalive)
+                        base_img = render_now_playing(
+                            self._np_last_art, title, artist, w, h, rotate,
+                            0, 0, draw_bar=False,
+                        )
+                        base_img.save(buf, format="JPEG", quality=92)
+                        self._np_base_jpeg = buf.getvalue()
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=92)
+                    self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
+                    self.lcd.send_frame(self._np_last_frame)
+                    # Keepalive: re-send every 100ms so the AIO stays lit.
+                    # If we're the active stream, the player is stopped;
+                    # schedule the re-send loop.
+                    if self._np_keepalive_job is None:
+                        self._np_keepalive_job = self.after(
+                            100, self._np_keepalive)
                 except Exception:
                     pass
         except Exception:
@@ -1072,7 +1089,13 @@ class LCDApp(tk.Tk):
         if key != self._np_last_key:
             return  # track changed since; stale
         self._np_last_art = art
+        self._np_base_jpeg = None  # new track -> rebuild the clean base
         if art is not None:
+            # Skip the tab thumbnail render when the same art is already
+            # streaming to the AIO — redundant (and costs CPU/GPU).
+            if self._np_streaming_to_aio():
+                self._draw_np_placeholder("Streaming to AIO…")
+                return
             thumb = art.copy()
             thumb.thumbnail((300, 170))
             self._np_art_photo = ImageTk.PhotoImage(thumb)
@@ -1197,14 +1220,24 @@ class LCDApp(tk.Tk):
         if total < 2:
             return
         # Don't animate the preview while the same content plays on the
-        # AIO — it's redundant and costs ~0.09 cores of CPU.
-        if self.player is not None:
+        # AIO — it's redundant and costs ~0.09 cores of CPU. Covers both
+        # GIF playback (player active) and artwork streaming (auto-display).
+        if self.player is not None or self._np_streaming_to_aio():
             self._preview_job = self.after(200, self._animate_preview)
             return
         self._preview_idx = (self._preview_idx + 1) % total
         self._render_preview_frame(self._preview_idx)
         delay = getattr(self, "_preview_delay", 80)
         self._preview_job = self.after(delay, self._animate_preview)
+
+    def _np_streaming_to_aio(self) -> bool:
+        """True when the now-playing artwork is currently being streamed
+        to the AIO (auto-display on with art available + connected)."""
+        return (
+            self.lcd is not None
+            and self.np_auto_var.get()
+            and self._np_last_art is not None
+        )
 
     def _stop_preview(self):
         if self._preview_job:
