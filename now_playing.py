@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Display the currently-playing track's album artwork on the AIO LCD.
+
+Polls Windows' GlobalSystemMediaTransportControls (GSMTC) API every
+few seconds — the same surface that powers the volume-flyout media card.
+Renders a clean 1600x720 "now playing" layout: heavily-blurred album
+art as background, centered album square, song + artist text.
+
+Works with any app that registers with Windows media controls
+(Apple Music, Spotify, foobar2000, MusicBee, etc.).
+
+Usage:
+    python now_playing.py
+    python now_playing.py --poll 2        # seconds between updates
+    python now_playing.py --width 1600 --height 720 --rotate 180
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import io
+import sys
+import threading
+import time
+from typing import Optional
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+from usblcd.device import USBLCD, LCDDeviceError
+from usblcd.frames import jpeg_to_frame
+
+# ---------- winsdk GSMTC (lazy import so --help works without it) ----------
+WSDK_AVAILABLE = False
+try:
+    from winsdk.windows.media.control import (
+        GlobalSystemMediaTransportControlsSessionManager as SMTCManager,
+    )
+    WSDK_AVAILABLE = True
+except ImportError:
+    pass
+
+
+# ---------- GSMTC helpers (winsdk is async-only; this wraps it) ---------- #
+
+def _sync(op, timeout: float = 5.0):
+    """Block until an IAsyncOperation completes; return its result."""
+    done = threading.Event()
+    op.completed = lambda *a, **k: done.set()
+    done.wait(timeout)
+    return op.get_results()
+
+
+def _get_active_session():
+    """Return the first GSMTC session that has media info (Apple Music etc.)."""
+    if not WSDK_AVAILABLE:
+        return None, None, None
+    try:
+        mgr = _sync(SMTCManager.request_async())
+        for session in mgr.get_sessions():
+            try:
+                info = _sync(session.try_get_media_properties_async(), timeout=2.0)
+                if info and (info.title or info.artist):
+                    return session, info, session.source_app_user_model_id
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _get_thumbnail_pil(info, max_size: int = 512) -> Optional[Image.Image]:
+    """Download the album-art thumbnail (GSMTC) as a PIL Image."""
+    try:
+        thumb_ref = info.thumbnail
+        if thumb_ref is None:
+            return None
+        stream = _sync(thumb_ref.open_read_async(), timeout=3.0)
+        # DataReader (proper async path — read() is sync-only & unsupported)
+        from winsdk.windows.storage.streams import DataReader
+        reader = DataReader(stream.get_input_stream_at(0))
+        _sync(reader.load_async(stream.size), timeout=3.0)
+        ibuf = reader.read_buffer(stream.size)
+        return Image.open(io.BytesIO(bytes(ibuf)))
+    except Exception:
+        return None
+
+
+# ---------- Layout rendering ---------- #
+
+def render_now_playing(
+    art: Image.Image,
+    title: str,
+    artist: str,
+    width: int = 1600,
+    height: int = 720,
+    rotate: int = 0,
+) -> Image.Image:
+    """Build the full 1600x720 now-playing image."""
+    panel = Image.new("RGB", (width, height), (10, 10, 14))
+    draw = ImageDraw.Draw(panel)
+
+    # 1. Background: album art scaled to fill, heavily blurred
+    bg = art.copy().convert("RGB")
+    bg = _scale(bg, (width, height), mode="fill")
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=32))
+    # Darken overlay so text reads
+    dark = Image.new("RGB", (width, height), (0, 0, 0))
+    panel.paste(bg, (0, 0))
+    panel.paste(dark, (0, 0), Image.new("RGBA", (width, height), (0, 0, 0, 110)))
+
+    # 2. Centered album square (left-of-center, classic layout)
+    side = min(width // 3, height - 120)
+    art_sq = art.copy().convert("RGB")
+    art_sq = _scale(art_sq, (side, side), mode="fill")
+    # Subtle border
+    ax = 80
+    ay = (height - side) // 2
+    panel.paste(art_sq, (ax, ay))
+    draw.rectangle([ax, ay, ax + side - 1, ay + side - 1],
+                   outline=(255, 255, 255, 60), width=2)
+
+    # 3. Text (right of album art)
+    tx = ax + side + 40
+    ty = ay + 30
+    font_title = _font(72)
+    font_artist = _font(40)
+
+    # Truncate long titles to one line
+    title = title.strip() if title else "—"
+    artist = artist.strip() if artist else ""
+    while draw.textlength(title, font=font_title) > width - tx - 60 and len(title) > 4:
+        title = title[:-2]
+    artist = artist if draw.textlength(artist, font=font_artist) <= width - tx - 60 \
+        else (artist[:60] + "…") if len(artist) > 60 else artist
+
+    draw.text((tx, ty), title, fill=(245, 245, 248), font=font_title)
+    draw.text((tx, ty + 100), artist, fill=(180, 185, 195), font=font_artist)
+    draw.text((tx, ty + 170), "NOW PLAYING", fill=(130, 140, 160), font=_font(24))
+
+    # 4. Apply rotation (panel may be physically flipped)
+    if rotate:
+        panel = panel.rotate(-rotate, expand=True)
+
+    return panel
+
+
+def _scale(img: Image.Image, target: tuple[int, int], mode: str = "fit") -> Image.Image:
+    """Fit / fill / stretch — matches the GUI's scale modes."""
+    tw, th = target
+    iw, ih = img.size
+    if mode == "stretch":
+        return img.resize((tw, th), Image.LANCZOS)
+    if mode == "fill":
+        s = max(tw / iw, th / ih)
+        return img.resize((int(iw * s), int(ih * s)), Image.LANCZOS).crop((
+            (int(iw * s) - tw) // 2, (int(ih * s) - th) // 2,
+            (int(iw * s) + tw) // 2, (int(ih * s) + th) // 2,
+        ))
+    # fit (letterbox)
+    s = min(tw / iw, th / ih)
+    nw, nh = int(iw * s), int(ih * s)
+    bg = Image.new("RGB", (tw, th), (10, 10, 14))
+    bg.paste(img.resize((nw, nh), Image.LANCZOS), ((tw - nw) // 2, (th - nh) // 2))
+    return bg
+
+
+def _font(px: int) -> ImageFont.FreeTypeFont:
+    try:
+        return ImageFont.truetype("segoeui.ttf", px)
+    except Exception:
+        return ImageFont.load_default()
+
+
+# ---------- Main loop ---------- #
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--width", type=int, default=1600)
+    ap.add_argument("--height", type=int, default=720)
+    ap.add_argument("--rotate", type=int, default=180,
+                    help="panel rotation (0/90/180/270); use 180 for AIOs flipped in case")
+    ap.add_argument("--poll", type=float, default=2.0,
+                    help="seconds between GSMTC polls (default: 2)")
+    ap.add_argument("--quality", type=int, default=92, help="JPEG quality (default: 92)")
+    args = ap.parse_args()
+
+    if not WSDK_AVAILABLE:
+        print("ERROR: winsdk not installed. Run: pip install winsdk", file=sys.stderr)
+        return 1
+
+    try:
+        lcd = USBLCD("usbdisplay")
+        if not lcd.find():
+            print(f"ERROR: USB LCD (0x87AD:0x70DB) not found", file=sys.stderr)
+            return 2
+        lcd.open()
+        lcd.handshake()
+    except LCDDeviceError as e:
+        print(f"ERROR: LCD open failed: {e}", file=sys.stderr)
+        return 2
+
+    print(f"Display: {lcd.dev.product}")
+    print(f"Rendering {args.width}x{args.height}, rotate {args.rotate}, "
+          f"poll {args.poll}s. Ctrl-C to stop.")
+
+    last_key = None
+    last_frame = None
+    no_art_counter = 0
+
+    try:
+        while True:
+            session, info, app_id = _get_active_session()
+
+            if info is None:
+                # No active media — show a calm "nothing playing" panel
+                if last_key != "__idle__":
+                    print(f"[{time.strftime('%H:%M:%S')}] no active media session")
+                    last_key = "__idle__"
+                time.sleep(args.poll)
+                continue
+
+            title = info.title or ""
+            artist = info.artist or ""
+            key = f"{app_id}|{title}|{artist}"
+
+            # Only re-render when the track changes
+            if key != last_key:
+                print(f"[{time.strftime('%H:%M:%S')}] {app_id}: {title} — {artist}")
+                last_key = key
+                art = _get_thumbnail_pil(info)
+                if art is None:
+                    no_art_counter += 1
+                    print(f"  no artwork ({no_art_counter})")
+                    # Send a "no track art" panel so the display doesn't go stale
+                    img = Image.new("RGB", (args.width, args.height), (10, 10, 14))
+                    d = ImageDraw.Draw(img)
+                    d.text((60, 60), title or "—", fill=(245, 245, 248), font=_font(72))
+                    d.text((60, 160), artist, fill=(180, 185, 195), font=_font(40))
+                    if args.rotate:
+                        img = img.rotate(-args.rotate, expand=True)
+                else:
+                    no_art_counter = 0
+                    img = render_now_playing(art, title, artist, args.width, args.height, args.rotate)
+
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=args.quality)
+                frame = buf.getvalue()
+                lcd.send_frame(jpeg_to_frame(frame, *img.size))
+                last_frame = frame
+
+            time.sleep(args.poll)
+    except KeyboardInterrupt:
+        print("\nStopping.")
+    finally:
+        try:
+            lcd.close()
+        except Exception:
+            pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
