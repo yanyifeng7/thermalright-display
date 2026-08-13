@@ -1122,13 +1122,9 @@ class LCDApp(tk.Tk):
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=92)
                     self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
-                    self.lcd.send_frame(self._np_last_frame)
+                    self._np_send(self._np_last_frame)
                     # Keepalive: re-send every 100ms so the AIO stays lit.
-                    # If we're the active stream, the player is stopped;
-                    # schedule the re-send loop.
-                    if self._np_keepalive_job is None:
-                        self._np_keepalive_job = self.after(
-                            100, self._np_keepalive)
+                    self._np_start_keepalive()
                 except Exception:
                     pass
         except Exception:
@@ -1184,26 +1180,95 @@ class LCDApp(tk.Tk):
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=92)
                 self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
-                self.lcd.send_frame(self._np_last_frame)
+                self._np_send(self._np_last_frame)
                 # Keepalive follows (the 100ms re-send uses this frame)
-                if self._np_keepalive_job is None:
-                    self._np_keepalive_job = self.after(100, self._np_keepalive)
+                self._np_start_keepalive()
         except Exception:
             pass
         self._np_render_job = self.after(500, self._np_render_tick)
 
+    def _np_send_ensure_writer(self):
+        """Start the background USB writer thread if not running.
+        The writer drains the latest-frame slot so the main thread never
+        blocks on a USB write (a slow write used to stall the tkinter
+        mainloop: 258% CPU)."""
+        if getattr(self, "_np_writer", None) is not None:
+            return
+        import queue as _queue
+        self._np_frame_q = _queue.Queue(maxsize=1)  # latest frame only
+        self._np_writer_stop = threading.Event()
+
+        def writer():
+            q = self._np_frame_q
+            stop = self._np_writer_stop
+            lcd = None
+            while not stop.is_set():
+                try:
+                    frame = q.get(timeout=0.5)
+                except Exception:
+                    continue  # empty; loop (also lets stop event be seen)
+                if frame is None:
+                    continue
+                # Drain to the latest frame (keepalive only needs freshness)
+                latest = frame
+                while True:
+                    try:
+                        latest = q.get_nowait()
+                    except Exception:
+                        break
+                if lcd is None:
+                    lcd = self.lcd
+                if lcd is not None:
+                    try:
+                        lcd.send_frame(latest)
+                    except Exception:
+                        pass
+
+        t = threading.Thread(target=writer, daemon=True, name="np-usb-writer")
+        t.start()
+        self._np_writer = t
+
+    def _np_send(self, frame: bytes):
+        """Publish a frame for the background writer (never blocks)."""
+        self._np_send_ensure_writer()
+        q = getattr(self, "_np_frame_q", None)
+        if q is None:
+            return
+        try:
+            if q.full():
+                # Keep only the newest frame
+                try:
+                    q.get_nowait()
+                except Exception:
+                    pass
+            q.put_nowait(frame)
+        except Exception:
+            pass
+
+    def _np_start_keepalive(self):
+        """Start the keepalive loop, but only if no other path already did.
+        Uses a generation counter: each caller bumps the generation; the
+        loop only continues if it's still the latest generation. This is
+        race-free where a bare None-check wasn't (a None-check let two
+        keepalive loops start, doubling USB traffic + CPU)."""
+        gen = getattr(self, "_np_keepalive_gen", 0) + 1
+        self._np_keepalive_gen = gen
+        if self._np_keepalive_job is not None:
+            return  # someone already runs it
+        self._np_keepalive_job = self.after(100, self._np_keepalive)
+
     def _np_keepalive(self):
         """Re-send the last now-playing frame every 100ms so the AIO panel
-        doesn't power down between polls."""
+        doesn't power down between polls. The actual USB write happens on
+        the background writer thread — never on the mainloop."""
+        gen = getattr(self, "_np_keepalive_gen", 0)
         self._np_keepalive_job = None
         if not (self.np_auto_var.get() or self._np_active):
             return  # artwork no longer has priority
         if self.lcd is not None and self._np_last_frame is not None:
-            try:
-                self.lcd.send_frame(self._np_last_frame)
-            except Exception:
-                pass
-            self._np_keepalive_job = self.after(100, self._np_keepalive)
+            self._np_send(self._np_last_frame)
+            if getattr(self, "_np_keepalive_gen", 0) == gen:
+                self._np_keepalive_job = self.after(100, self._np_keepalive)
 
     def _np_art_ready(self, key, art):
         """Called on the UI thread when the background art fetch completes."""
@@ -1250,6 +1315,14 @@ class LCDApp(tk.Tk):
             except Exception:
                 pass
             self._np_render_job = None
+        # Stop the background USB writer
+        if getattr(self, "_np_writer", None) is not None:
+            try:
+                self._np_writer_stop.set()
+            except Exception:
+                pass
+            self._np_writer = None
+            self._np_frame_q = None
 
     def _load_preview(self, path: str):
         """Open source once; render frames at preview scale."""
