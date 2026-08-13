@@ -154,9 +154,14 @@ def test_np_poller_sends_artwork_frame(app, monkeypatch):
         app.np_auto_var.set(True)
         app._np_active = True
 
-        # Run the poller body
+        # Run the poller body (spawns a background fetch thread)
         app._np_poll_once()
-        app.update()
+        # Pump the tk loop until the background fetch lands + frame sends
+        import time as _time
+        deadline = _time.monotonic() + 5
+        while _time.monotonic() < deadline and not app.lcd.sent:
+            app.update()
+            _time.sleep(0.05)
         assert len(app.lcd.sent) >= 1, "no frame was sent to the LCD"
     finally:
         app.lcd = saved_lcd

@@ -927,33 +927,80 @@ class LCDApp(tk.Tk):
                 self._np_keepalive_job = None
 
     def _np_poll_once(self):
-        """Poll GSMTC; update the Now Playing tab + optionally the AIO."""
+        """Poll GSMTC on a BACKGROUND thread; never block the tkinter
+        mainloop. The winsdk async calls can take ~2s (cross-process COM
+        to the media app) — running them on the UI thread made polls
+        overlap and stack waits (the 132% CPU / thread-leak bug).
+
+        The UI thread only schedules the fetch + a keepalive render; the
+        background thread delivers metadata back via after().
+        """
         self._np_poll_job = None
         # Run while the tab is open OR auto-display wants artwork priority
         if not self._np_active and not self.np_auto_var.get():
             return
+        if getattr(self, "_np_session_fetching", False):
+            # A fetch is in flight; don't stack another (the old bug).
+            self._np_poll_job = self.after(3000, self._np_poll_once)
+            return
+        self._np_session_fetching = True
+
+        def fetch():
+            try:
+                from now_playing import _get_active_session
+                result = _get_active_session()
+            except Exception:
+                result = (None, None, None, 0, 0)
+            # Store in a thread-safe slot; the main-thread render tick
+            # picks it up (tkinter after() can't be called from here).
+            self._np_session_result = result
+
+        threading.Thread(target=fetch, daemon=True).start()
+        # Ensure the render tick is running (it drains the fetch result
+        # and keeps the progress bar smooth between metadata polls)
+        if getattr(self, "_np_render_job", None) is None:
+            self._np_render_job = self.after(500, self._np_render_tick)
+
+    def _np_session_ready(self):
+        """Called on the UI thread (from the render tick) when a background
+        GSMTC fetch has landed; renders the artwork frame."""
+        self._np_session_fetching = False
+        result = self._np_session_result
+        self._np_session_result = None
         try:
             from now_playing import (
-                _get_active_session,
                 _get_thumbnail_pil,
                 _format_mmss,
                 render_now_playing,
                 _redraw_bar,
             )
-            session, info, app_id, pos, dur = _get_active_session()
+            session, info, app_id, pos, dur = result
             if info is None or not info.title:
                 self._set_np_idle()
                 # Auto-fallback: AIO shows the playlist
                 self._np_active = False
+                # Stop the render tick (no session = nothing to draw)
+                if getattr(self, "_np_render_job", None):
+                    try:
+                        self.after_cancel(self._np_render_job)
+                    except Exception:
+                        pass
+                    self._np_render_job = None
                 if self.player is None and self.frames:
                     # resume playlist? just stop the now-playing stream
                     pass
-                self._np_poll_job = self.after(2000, self._np_poll_once)
+                self._np_poll_job = self.after(3000, self._np_poll_once)
                 return
 
             title = info.title or ""
             artist = info.artist or ""
             key = f"{app_id}|{title}|{artist}"
+            # Store the freshest metadata + timestamps so the cheap render
+            # tick can interpolate position between GSMTC polls.
+            self._np_meta = (title, artist, key)
+            self._np_duration = dur
+            self._np_pos_base = pos
+            self._np_pos_time = time.monotonic()
 
             # Art refresh (only when the track changed)
             if key != self._np_last_key:
@@ -1090,8 +1137,60 @@ class LCDApp(tk.Tk):
         # ~2s to resolve (the _sync wait). A 1s schedule overlaps polls,
         # stacking _sync waits on the tkinter thread and leaking a thread
         # per poll (measured: 9,780 threads / 1.6GB after ~1h). Position
-        # smoothness is preserved by _redraw_bar interpolation between polls.
+        # smoothness is preserved by the 500ms _np_render_tick between polls.
         self._np_poll_job = self.after(3000, self._np_poll_once)
+
+    def _np_render_tick(self):
+        """Cheap per-tick render (every 500ms): interpolate the position
+        from the last GSMTC poll + monotonic clock, then redraw only the
+        bar strip via _redraw_bar (~5ms). No GSMTC, no threads — this is
+        what keeps the progress bar smooth between 3s metadata polls.
+
+        Also picks up a background session fetch result when one landed
+        (the fetch thread can't call tkinter after(), so the result is
+        stored in a slot this tick drains)."""
+        self._np_render_job = None
+        if not (self.np_auto_var.get() or self._np_active):
+            return
+        # Drain a completed background session fetch, if any
+        if getattr(self, "_np_session_result", None) is not None:
+            self._np_session_ready()
+        meta = getattr(self, "_np_meta", None)
+        if meta is None or self.lcd is None or self._np_last_art is None:
+            # Nothing to render yet; keep ticking
+            self._np_render_job = self.after(500, self._np_render_tick)
+            return
+        try:
+            title, artist, _key = meta
+            dur = getattr(self, "_np_duration", 0) or 0
+            base = getattr(self, "_np_pos_base", 0) or 0
+            t0 = getattr(self, "_np_pos_time", time.monotonic())
+            pos = base + (time.monotonic() - t0)
+            if dur > 0 and pos > dur:
+                pos = dur  # clamp; next poll will confirm track end
+            if dur > 0 and self._np_base_jpeg is not None:
+                from now_playing import _redraw_bar
+                w, h = 1600, 720
+                rot_s = str(self.rot_var.get()).replace("°", "").strip()
+                rotate = int(rot_s) if rot_s.isdigit() else 0
+                img = _redraw_bar(
+                    self._np_last_art, title, artist, w, h, rotate,
+                    pos, dur, self._np_base_jpeg,
+                )
+                # Overlay sprite (same as GIF playback)
+                if self.monitor_var.get() and self._np_sprite is not None:
+                    block, paste = self._np_sprite
+                    img.paste(block, paste, block)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=92)
+                self._np_last_frame = jpeg_to_frame(buf.getvalue(), w, h)
+                self.lcd.send_frame(self._np_last_frame)
+                # Keepalive follows (the 100ms re-send uses this frame)
+                if self._np_keepalive_job is None:
+                    self._np_keepalive_job = self.after(100, self._np_keepalive)
+        except Exception:
+            pass
+        self._np_render_job = self.after(500, self._np_render_tick)
 
     def _np_keepalive(self):
         """Re-send the last now-playing frame every 100ms so the AIO panel
@@ -1145,6 +1244,12 @@ class LCDApp(tk.Tk):
         if self._np_keepalive_job:
             self.after_cancel(self._np_keepalive_job)
             self._np_keepalive_job = None
+        if getattr(self, "_np_render_job", None):
+            try:
+                self.after_cancel(self._np_render_job)
+            except Exception:
+                pass
+            self._np_render_job = None
 
     def _load_preview(self, path: str):
         """Open source once; render frames at preview scale."""
