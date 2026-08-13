@@ -962,13 +962,24 @@ class LCDApp(tk.Tk):
                 # single-threaded mainloop (WinError -2147483634). Fetch
                 # the art on a background thread and deliver the PIL image
                 # back to the UI thread via after().
-                def fetch_art():
-                    try:
-                        art = _get_thumbnail_pil(info)
-                    except Exception:
-                        art = None
-                    self.after(0, lambda a=art: self._np_art_ready(key, a))
-                threading.Thread(target=fetch_art, daemon=True).start()
+                # Guard: never spawn a second fetch while one is in flight
+                # (a hung winsdk fetch used to leak one thread + GDI handle
+                # per poll — measured 9,780 threads / 63K handles / 1.6GB).
+                if getattr(self, "_np_fetch_inflight", False):
+                    # Keep the current art; just don't spawn another thread
+                    pass
+                else:
+                    self._np_fetch_inflight = True
+
+                    def fetch_art():
+                        try:
+                            art = _get_thumbnail_pil(info)
+                        except Exception:
+                            art = None
+                        self._np_fetch_inflight = False
+                        self.after(0, lambda a=art: self._np_art_ready(key, a))
+
+                    threading.Thread(target=fetch_art, daemon=True).start()
 
             # Text + progress (every poll)
             self.np_title_label.config(text=title)
@@ -1075,7 +1086,12 @@ class LCDApp(tk.Tk):
                     pass
         except Exception:
             pass
-        self._np_poll_job = self.after(1000, self._np_poll_once)
+        # Poll every 3s, not 1s: _get_active_session's winsdk async can take
+        # ~2s to resolve (the _sync wait). A 1s schedule overlaps polls,
+        # stacking _sync waits on the tkinter thread and leaking a thread
+        # per poll (measured: 9,780 threads / 1.6GB after ~1h). Position
+        # smoothness is preserved by _redraw_bar interpolation between polls.
+        self._np_poll_job = self.after(3000, self._np_poll_once)
 
     def _np_keepalive(self):
         """Re-send the last now-playing frame every 100ms so the AIO panel
