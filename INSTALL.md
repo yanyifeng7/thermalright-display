@@ -69,6 +69,13 @@ It mirrors to the AIO automatically.
 `start_gui.bat` via `requirements.txt`). This is the only extra dependency
 for this feature — everything else is shared.
 
+**Cost (measured 2026-08-13):** the Now Playing stream (album art +
+progress bar + optional sensor overlay) runs at **~0.034 cores / ~205 MB**
+with everything enabled — about 12× less than TRCC's full stack. The
+GSMTC metadata fetch happens on a background thread every 3s, so the UI
+never blocks on the media app, and the progress bar interpolates smoothly
+between polls.
+
 **Usage:**
 1. Open the GUI, connect the display.
 2. Play something in Apple Music (or any music app).

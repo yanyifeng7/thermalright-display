@@ -98,9 +98,19 @@ MusicBee, browsers, etc. — and can mirror it to the AIO:
   (Noto Serif SC variable font, download under
   [Google Fonts](https://fonts.google.com/noto/specimen/Noto+Serif+SC)).
 
-**Cost:** ~0.022 cores (2.2%) for the full GUI with artwork streaming — the
-same ballpark as the CLI script (0.041 cores). GSMTC polling itself is
-~2.5 ms/poll (negligible).
+**Cost (measured 2026-08-13, overlay ON + artwork streaming):**
+
+| Component | CPU | RAM |
+|---|---|---|
+| **usblcd GUI** (artwork + progress + overlay + tabs) | **0.034 cores (3.4%)** | ~205 MB |
+| LibreHardwareMonitor (background sensor source) | 0.017 cores (1.7%) | ~123 MB |
+| **Full stack total** | **~0.05 cores (5%)** | ~330 MB |
+
+The GSMTC session fetch runs on a **background thread** (never blocking the
+UI — the winsdk COM calls to the media app can take ~2s). The progress bar
+stays smooth via a 500 ms local render tick that interpolates position from
+the last poll; metadata is re-fetched every 3 s. This keeps the GUI at
+~1-3% CPU even when Apple Music is busy decoding lossless audio.
 
 > **`winsdk` is required for the Now Playing feature** — see [INSTALL.md](INSTALL.md).
 
@@ -146,6 +156,8 @@ background preload thread. Measured live (2026-08-11):
 |---|---|---|
 | **6-GIF playlist, loop on, playing** | **0.0039 cores (0.4%)** | ~100× less |
 | Single-GIF loop, brightness 45 | 0.0008 cores | ~500× less |
+| **Now Playing (album art + progress + overlay)** | **0.034 cores (3.4%)** | ~12× less |
+| **Full stack (GUI + LHM)** | **~0.05 cores (5%)** | ~8× less |
 | TRCC full stack (idle) | 0.405 cores | — |
 
 Brightness changes rebuild the cache in the background (debounced 800 ms so
