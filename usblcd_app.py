@@ -1228,7 +1228,11 @@ class LCDApp(tk.Tk):
         # Don't animate the preview while the same content plays on the
         # AIO — it's redundant and costs ~0.09 cores of CPU. Covers both
         # GIF playback (player active) and artwork streaming (auto-display).
-        if self.player is not None or self._np_streaming_to_aio():
+        # Also pause when NOT connected and nothing is playing: at startup
+        # the persisted playlist auto-loads and the preview would otherwise
+        # loop GIF frame decodes forever (~10% CPU) for no viewer benefit.
+        if (self.player is not None or self._np_streaming_to_aio()
+                or (self.lcd is None and self.player is None)):
             self._preview_job = self.after(200, self._animate_preview)
             return
         self._preview_idx = (self._preview_idx + 1) % total

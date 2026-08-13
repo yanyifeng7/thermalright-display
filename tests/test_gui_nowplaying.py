@@ -139,15 +139,39 @@ def test_np_poller_sends_artwork_frame(app, monkeypatch):
 
     monkeypatch.setattr(np_mod, "_get_thumbnail_pil", fake_thumb)
 
-    app.lcd = FakeLCD()
-    app._np_last_art = fake_thumb(None)
-    app._np_last_key = "test.App|Sample Title|Sample Artist"
-    app._np_base_jpeg = None
+    # Save + force the state the poller depends on (module-scoped app)
+    saved_lcd = app.lcd
+    saved_auto = app.np_auto_var.get()
+    saved_active = app._np_active
+    saved_art = app._np_last_art
+    saved_key = app._np_last_key
+    saved_base = app._np_base_jpeg
+    try:
+        app.lcd = FakeLCD()
+        app._np_last_art = fake_thumb(None)
+        app._np_last_key = "test.App|Sample Title|Sample Artist"
+        app._np_base_jpeg = None
+        app.np_auto_var.set(True)
+        app._np_active = True
 
-    # Run the poller body
-    app._np_poll_once()
-    app.update()
-    assert len(app.lcd.sent) >= 1, "no frame was sent to the LCD"
+        # Run the poller body
+        app._np_poll_once()
+        app.update()
+        assert len(app.lcd.sent) >= 1, "no frame was sent to the LCD"
+    finally:
+        app.lcd = saved_lcd
+        app.np_auto_var.set(saved_auto)
+        app._np_active = saved_active
+        app._np_last_art = saved_art
+        app._np_last_key = saved_key
+        app._np_base_jpeg = saved_base
+        # Cancel the rescheduled poll so it doesn't fire after teardown
+        if app._np_poll_job:
+            try:
+                app.after_cancel(app._np_poll_job)
+            except Exception:
+                pass
+            app._np_poll_job = None
 
 
 def test_np_poll_idle_no_crash(app, monkeypatch):
@@ -197,3 +221,40 @@ def test_brightness_invalidates_base(app):
         except Exception:
             pass
         app._brightness_cache_job = None
+
+
+def test_preview_paused_when_not_connected(app):
+    """Regression: at startup the persisted playlist auto-selects the
+    first clip, which used to start the preview animation loop — burning
+    ~10% CPU decoding GIF frames while idle. The preview must pause when
+    the device isn't connected and nothing is playing."""
+    # Save state we mutate (module-scoped app is shared between tests)
+    saved_lcd = app.lcd
+    saved_player = app.player
+    saved_art = app._np_last_art
+    saved_auto = app.np_auto_var.get()
+    try:
+        app.lcd = None
+        app.player = None
+        app._np_last_art = None  # clear any leaked art (module-scoped app)
+        app.np_auto_var.set(False)
+        # Simulate a multi-frame GIF preview being active
+        app._preview_total = 44
+        app._preview_idx = 0
+        app._preview_job = None
+
+        app._animate_preview()
+        # The pause branch reschedules without rendering a new frame:
+        # _preview_idx must NOT advance
+        assert app._preview_idx == 0, "preview advanced a frame while idle"
+
+        # And with a connected device (browsing), it should animate
+        app.lcd = FakeLCD()
+        app._animate_preview()
+        assert app._preview_idx == 1, "preview did not animate while connected"
+    finally:
+        # Restore the shared app state
+        app.lcd = saved_lcd
+        app.player = saved_player
+        app._np_last_art = saved_art
+        app.np_auto_var.set(saved_auto)
