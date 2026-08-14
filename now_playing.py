@@ -208,12 +208,15 @@ def _draw_progress_bar(draw, bar_x, bar_y, bar_w, bar_h, position_sec, duration_
     """Draw the progress bar + mm:ss labels (shared by full render and redraw)."""
     # Background track (dim gray)
     draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(90, 95, 110))
-    # Filled portion (light gray)
-    ratio = max(0.0, min(1.0, position_sec / duration_sec))
-    fill_w = max(1, int(bar_w * ratio)) if ratio > 0 else 0
-    if fill_w > 0:
-        draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h],
-                       fill=(200, 205, 215))
+    # Filled portion (light gray).
+    # Guard: duration_sec can be 0 (live streams, YouTube, or a GSMTC
+    # race where the timeline hasn't populated) — never divide by zero.
+    if duration_sec > 0:
+        ratio = max(0.0, min(1.0, position_sec / duration_sec))
+        fill_w = max(1, int(bar_w * ratio)) if ratio > 0 else 0
+        if fill_w > 0:
+            draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h],
+                           fill=(200, 205, 215))
     # mm:ss labels below the bar
     played = _format_mmss(position_sec)
     total = _format_mmss(duration_sec)

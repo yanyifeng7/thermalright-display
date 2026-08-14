@@ -163,3 +163,21 @@ def test_draw_progress_bar_geometry(readings):
     fill_x = bx + int(bw * 0.10)
     p = d.getpixel((fill_x, by + bh // 2))
     assert (abs(p[0] - 200) < 10 and abs(p[1] - 205) < 10), p
+
+
+def test_draw_progress_bar_zero_duration():
+    """Regression: duration_sec=0 (live streams, YouTube, GSMTC race)
+    caused ZeroDivisionError in the render tick — a silent exception loop
+    that raised CPU to 50C. Must draw an empty bar, never divide by zero."""
+    from PIL import ImageDraw
+    img = Image.new("RGB", (1600, 720), (10, 10, 14))
+    draw = ImageDraw.Draw(img)
+    from now_playing import _bar_geometry, _draw_progress_bar, _font
+    bx, by, bw, bh = _bar_geometry(1600, 720)
+    # Must not raise:
+    _draw_progress_bar(draw, bx, by, bw, bh, 100, 0, _font(28), 80)
+    _draw_progress_bar(draw, bx, by, bw, bh, 100, -5, _font(28), 80)
+    # Zero-duration bar has no light-gray fill (empty bar)
+    for x in range(bx, bx + bw):
+        p = img.getpixel((x, by + bh // 2))
+        assert not (abs(p[0] - 200) < 10 and abs(p[1] - 205) < 10), x
