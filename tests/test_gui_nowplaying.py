@@ -263,3 +263,60 @@ def test_preview_paused_when_not_connected(app):
         app.player = saved_player
         app._np_last_art = saved_art
         app.np_auto_var.set(saved_auto)
+
+
+def test_corrupt_base_does_not_spin(app):
+    """Regression: a corrupt base JPEG (e.g. a truncated encode from an
+    interrupted render) used to make _redraw_bar throw every 500ms, which
+    the silent except swallowed — a hot raise/catch loop measured at 66%
+    CPU (PyErr_PrintEx churn in the flamegraph). The tick must detect a
+    non-JPEG base and drop it (rebuild on next poll) instead of retrying.
+    """
+    # Save state we mutate
+    saved_lcd = app.lcd
+    saved_meta = getattr(app, "_np_meta", None)
+    saved_art = app._np_last_art
+    saved_base = app._np_base_jpeg
+    saved_dur = getattr(app, "_np_duration", 0)
+    saved_pos = getattr(app, "_np_pos_base", 0)
+    saved_pt = getattr(app, "_np_pos_time", None)
+    try:
+        from PIL import Image
+        app.lcd = FakeLCD()
+        app._np_meta = ("T", "A", "k")
+        app._np_last_art = Image.new("RGB", (64, 64), (1, 2, 3))
+        app._np_duration = 240
+        app._np_pos_base = 10
+        app._np_pos_time = __import__("time").monotonic()
+        app._np_sprite = None
+        app.np_auto_var.set(True)   # ensure the tick runs
+        app._np_active = True
+        app._np_session_result = None  # don't drain stale fetch
+        # The corrupt base: not a JPEG (truncated/garbage bytes)
+        app._np_base_jpeg = b"stale-garbage-bytes"
+
+        # Drive exactly ONE tick synchronously (no after() re-entry)
+        app._np_render_job = None
+        app._np_render_tick()
+        if app._np_render_job:
+            app.after_cancel(app._np_render_job)
+            app._np_render_job = None
+        # The guard must drop the bad base and NOT send a frame
+        assert app._np_base_jpeg is None, "corrupt base not dropped"
+        assert not app.lcd.sent, "corrupt base produced a frame"
+    finally:
+        app.lcd = saved_lcd
+        app._np_meta = saved_meta
+        app._np_last_art = saved_art
+        app._np_base_jpeg = saved_base
+        app._np_duration = saved_dur
+        app._np_pos_base = saved_pos
+        app._np_pos_time = saved_pt
+        app.np_auto_var.set(True)
+        app._np_active = False
+        if app._np_render_job:
+            try:
+                app.after_cancel(app._np_render_job)
+            except Exception:
+                pass
+            app._np_render_job = None

@@ -1166,12 +1166,22 @@ class LCDApp(tk.Tk):
                 pos = dur  # clamp; next poll will confirm track end
             if dur > 0 and self._np_base_jpeg is not None:
                 from now_playing import _redraw_bar
+                # Guard: a corrupt base (failed encode) makes every tick
+                # throw UnidentifiedImageError, which the except below
+                # swallows -> a hot raise/catch loop at 2/sec (measured
+                # 66% CPU from PyErr_PrintEx churn). Validate once and
+                # drop the bad base so the next session poll rebuilds it.
+                base_jpeg = self._np_base_jpeg
+                if not base_jpeg.startswith(b"\xff\xd8"):
+                    self._np_base_jpeg = None  # rebuild on next poll
+                    self._np_render_job = self.after(500, self._np_render_tick)
+                    return
                 w, h = 1600, 720
                 rot_s = str(self.rot_var.get()).replace("°", "").strip()
                 rotate = int(rot_s) if rot_s.isdigit() else 0
                 img = _redraw_bar(
                     self._np_last_art, title, artist, w, h, rotate,
-                    pos, dur, self._np_base_jpeg,
+                    pos, dur, base_jpeg,
                 )
                 # Overlay sprite (same as GIF playback)
                 if self.monitor_var.get() and self._np_sprite is not None:
