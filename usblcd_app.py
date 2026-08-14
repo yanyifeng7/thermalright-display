@@ -970,6 +970,11 @@ class LCDApp(tk.Tk):
             # A fetch is in flight; don't stack another (the old bug).
             self._np_poll_job = self.after(3000, self._np_poll_once)
             return
+        # Mark a fetch as in-flight IMMEDIATELY (before the thread starts)
+        # so concurrent _np_auto_changed / tab-change callers can't spawn
+        # a second poll in the same event-loop iteration (they check
+        # _np_poll_job is None, which is true during the fetch window —
+        # that race accumulated hundreds of fetch threads, ~23s CPU each).
         self._np_session_fetching = True
 
         def fetch():
@@ -981,6 +986,11 @@ class LCDApp(tk.Tk):
             # Store in a thread-safe slot; the main-thread render tick
             # picks it up (tkinter after() can't be called from here).
             self._np_session_result = result
+            # Reset the in-flight flag HERE (in the thread that knows it
+            # finished), not in _np_session_ready — a race there let a
+            # pile-up of fetch threads accumulate (hundreds of threads,
+            # each ~23s CPU, temp -> 53C).
+            self._np_session_fetching = False
 
         threading.Thread(target=fetch, daemon=True).start()
         # Ensure the render tick is running (it drains the fetch result
@@ -1105,7 +1115,7 @@ class LCDApp(tk.Tk):
                                     OVERLAY_FONT_SCALE.get(self.overlay_font_var.get(), 1.0),
                                 )
                         except Exception:
-                            pass
+                            _log_exc("sensor_poll")
                 try:
                     # Rot values come as "180°" — strip the degree symbol
                     rot_s = str(self.rot_var.get()).replace("°", "").strip()
@@ -1175,6 +1185,19 @@ class LCDApp(tk.Tk):
         self._np_render_job = None
         if not (self.np_auto_var.get() or self._np_active):
             return
+        # Health check: the fetch-thread pile-up (hundreds of threads,
+        # each ~23s CPU, temp -> 53C) raised NO exception — it was silent.
+        # Log an early warning when the thread count grows abnormally so
+        # a leak is visible minutes after it starts, not hours later.
+        try:
+            import threading as _th
+            n = _th.active_count()
+            last = getattr(self, "_np_threads_last", None)
+            if last is not None and n > 50 and n > last:
+                _logger.warning("thread count growing: %d (was %d) — possible leak", n, last)
+            self._np_threads_last = n
+        except Exception:
+            pass
         # Drain a completed background session fetch, if any
         if getattr(self, "_np_session_result", None) is not None:
             self._np_session_ready()
