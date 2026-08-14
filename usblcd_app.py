@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import os
+import logging
 import sys
 import threading
 import time
@@ -17,6 +18,32 @@ from tkinter import filedialog, ttk
 from PIL import Image, ImageSequence, ImageTk
 
 from usblcd.device import USBLCD, LCDDeviceError
+
+# Runtime exception logging: hot loops used to swallow exceptions with
+# `except Exception: pass`, which hid real failures (e.g. the corrupt-base
+# bug that burned 66% CPU silently). These helpers log once per exception
+# type so a persistent failure is visible in the log without spamming it.
+_logger = logging.getLogger("usblcd-app")
+_logger.setLevel(logging.DEBUG)
+if not _logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _logger.addHandler(_h)
+
+_logged_excs: set = set()
+
+
+def _log_exc(context: str):
+    """Log a swallowed exception once per (context, type)."""
+    import traceback
+
+    et = sys.exc_info()[1]
+    key = (context, type(et).__name__)
+    if key in _logged_excs:
+        return
+    _logged_excs.add(key)
+    _logger.error("%s: %s: %s", context, type(et).__name__, et)
+    _logger.debug("".join(traceback.format_exc()))
 from usblcd.frames import jpeg_to_frame
 
 # Project root: directory containing this file
@@ -1126,9 +1153,9 @@ class LCDApp(tk.Tk):
                     # Keepalive: re-send every 100ms so the AIO stays lit.
                     self._np_start_keepalive()
                 except Exception:
-                    pass
+                    _log_exc("session_ready_render")
         except Exception:
-            pass
+            _log_exc("session_ready")
         # Poll every 3s, not 1s: _get_active_session's winsdk async can take
         # ~2s to resolve (the _sync wait). A 1s schedule overlaps polls,
         # stacking _sync waits on the tkinter thread and leaking a thread
@@ -1194,7 +1221,10 @@ class LCDApp(tk.Tk):
                 # Keepalive follows (the 100ms re-send uses this frame)
                 self._np_start_keepalive()
         except Exception:
-            pass
+            _log_exc("render_tick")
+        # Always reschedule (the tick is the smooth-bar heartbeat; an
+        # exception must not kill it — the corrupt-base guard handles
+        # the persistent-failure case, logging makes it visible).
         self._np_render_job = self.after(500, self._np_render_tick)
 
     def _np_send_ensure_writer(self):
