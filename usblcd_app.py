@@ -247,7 +247,7 @@ class MonitorThread(threading.Thread):
                     try:
                         self.app.after(0, lambda m=msg: self.on_status(m, "#1a8a3a"))
                     except Exception:
-                        pass
+                        _log_exc("monitor_status_marshal")
             self._stop.wait(0.5)
 
         if self._sensor is not None:
@@ -803,7 +803,7 @@ class LCDApp(tk.Tk):
                                 self._playlist_on_select()
                         self.after(0, _select_first)
                 except Exception:
-                    pass
+                    _log_exc("playlist_load")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1316,7 +1316,7 @@ class LCDApp(tk.Tk):
                 _logger.warning("thread count growing: %d (was %d) — possible leak", n, last)
             self._np_threads_last = n
         except Exception:
-            pass
+            _log_exc("thread_telemetry")
         # Drain a completed background session fetch, if any
         if getattr(self, "_np_session_result", None) is not None:
             self._np_session_ready()
@@ -1438,7 +1438,7 @@ class LCDApp(tk.Tk):
                     pass
             q.put_nowait(frame)
         except Exception:
-            pass
+            _log_exc("np_send_queue")
 
     def _np_start_keepalive(self):
         """Start the keepalive loop, but only if no other path already did.
