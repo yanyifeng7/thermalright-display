@@ -12,6 +12,7 @@ Covers the exact regressions hit during development:
 from __future__ import annotations
 
 import io
+import os
 
 import pytest
 from PIL import Image
@@ -79,6 +80,13 @@ def app():
     import usblcd_app
 
     app = usblcd_app.LCDApp()
+    # NEVER write to the real config.json from tests (the app auto-saves
+    # on var changes — the poll-rate test once leaked '2s' into the real
+    # config). Redirect to a temp file for the whole module.
+    import tempfile
+    _tmp_cfg = os.path.join(tempfile.gettempdir(), "usblcd_test_config.json")
+    app.CONFIG_PATH = _tmp_cfg
+    app._load_config()  # re-read from the temp path (empty = defaults)
     app.update_idletasks()
     app._test_session = session  # for tests needing the fake session
     yield app
@@ -320,3 +328,18 @@ def test_corrupt_base_does_not_spin(app):
             except Exception:
                 pass
             app._np_render_job = None
+
+
+def test_poll_interval_maps_rates(app):
+    """The user-selectable poll rate must map labels to seconds and fall
+    back to 3s for unknown values."""
+    app.np_poll_var.set("2s")
+    assert app._np_poll_interval() == 2
+    app.np_poll_var.set("3s")
+    assert app._np_poll_interval() == 3
+    app.np_poll_var.set("5s")
+    assert app._np_poll_interval() == 5
+    app.np_poll_var.set("10s")
+    assert app._np_poll_interval() == 10
+    app.np_poll_var.set("bogus")  # unknown -> fallback 3
+    assert app._np_poll_interval() == 3
