@@ -279,6 +279,10 @@ class LCDApp(tk.Tk):
         self._build_ui()
         self._load_config()
         self._set_status("Not connected", "#888")
+        # Watch the Now Playing Session Manager service: it has a known
+        # runaway (~100% CPU sustained) when a media session is active,
+        # which slowly heats the CPU. Restart it if it spins.
+        self._watchdog_start()
 
     # ---------- UI ----------
 
@@ -974,6 +978,87 @@ class LCDApp(tk.Tk):
         label = self.np_poll_var.get() if hasattr(self, "np_poll_var") else "3s"
         return POLL_RATE_SECONDS.get(label, 3)
 
+    # ---------- NPSMSvc watchdog ----------
+    # Windows' Now Playing Session Manager Service (NPSMSvc_*) has a known
+    # runaway: when a media session is active it can spin at ~100%+ of a
+    # core indefinitely (observed 98% avg over 2.4 days -> CPU temp creep
+    # 39->48C). Restarting it is safe (Windows respawns it on demand) and
+    # works non-elevated. This watchdog checks its CPU periodically and
+    # kills it when it sustains high usage.
+
+    def _watchdog_start(self):
+        self._watchdog_stop = threading.Event()
+        threading.Thread(target=self._watchdog_loop, daemon=True,
+                         name="npsmsvc-watchdog").start()
+
+    def _watchdog_stop_now(self):
+        getattr(self, "_watchdog_stop", threading.Event()).set()
+
+    def _watchdog_loop(self):
+        import subprocess
+        import psutil as _psutil
+
+        stop = getattr(self, "_watchdog_stop", threading.Event())
+        high_strikes = 0
+        handle_strikes = 0
+        while not stop.is_set():
+            try:
+                # Find the NPSMSvc process (name has a per-machine suffix)
+                out = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-Command",
+                     "Get-CimInstance Win32_Service | Where-Object { $_.Name -like 'NPSMSvc_*' } | "
+                     "ForEach-Object { $_.ProcessId }"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                ).stdout.strip()
+                pid = int(out.splitlines()[0]) if out.strip() else None
+                if pid is None:
+                    high_strikes = 0
+                    stop.wait(15)
+                    continue
+                # Measure its CPU over a 3s window (cpu_percent is since
+                # last call; call it once after the wait for the delta).
+                p = _psutil.Process(pid)
+                p.cpu_percent(interval=None)  # prime the sample
+                stop.wait(3)
+                avg = p.cpu_percent(interval=None)
+                # cpu_percent returns % of ONE core; ~1 core = 100%
+                if avg > 40:
+                    high_strikes += 1
+                    if high_strikes >= 3:
+                        _logger.warning(
+                            "NPSMSvc runaway: %.0f%% CPU sustained — restarting service", avg)
+                        subprocess.run(
+                            ["powershell.exe", "-NoProfile", "-Command",
+                             "Stop-Process -Id %d -Force" % pid],
+                            capture_output=True, timeout=10,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        high_strikes = 0
+                else:
+                    high_strikes = 0
+                # Handle leak: npsm.dll leaks COM/session handles (~0.4/s
+                # baseline; the runaway is a spin loop on leaked state).
+                # A big handle count with rising CPU = early spin signal.
+                h = p.num_handles()
+                if h > 1500:
+                    handle_strikes += 1
+                    if handle_strikes >= 2:
+                        _logger.warning(
+                            "NPSMSvc handle leak: %d handles — restarting service", h)
+                        subprocess.run(
+                            ["powershell.exe", "-NoProfile", "-Command",
+                             "Stop-Process -Id %d -Force" % pid],
+                            capture_output=True, timeout=10,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        handle_strikes = 0
+                else:
+                    handle_strikes = 0
+            except Exception:
+                _log_exc("watchdog")
+            stop.wait(15)
+
     def _np_poll_once(self):
         """Poll GSMTC on a BACKGROUND thread; never block the tkinter
         mainloop. The winsdk async calls can take ~2s (cross-process COM
@@ -1322,13 +1407,17 @@ class LCDApp(tk.Tk):
                         latest = q.get_nowait()
                     except Exception:
                         break
-                if lcd is None:
-                    lcd = self.lcd
+                # Read the LCD fresh EVERY loop: the writer must not cache
+                # the device object across disconnect/reconnect. A stale
+                # reference (closed LCD A) made send_frame throw on the
+                # new connection — silently swallowed, so frames vanished
+                # with no log and no artwork (reconnect bug).
+                lcd = self.lcd
                 if lcd is not None:
                     try:
                         lcd.send_frame(latest)
                     except Exception:
-                        pass
+                        _log_exc("np_writer_send")
 
         t = threading.Thread(target=writer, daemon=True, name="np-usb-writer")
         t.start()
@@ -1943,6 +2032,7 @@ class LCDApp(tk.Tk):
         self._stop_preview()
         self._stop_play()
         self._on_close_np()
+        self._watchdog_stop_now()
         if self.lcd is not None:
             try:
                 self.lcd.close()

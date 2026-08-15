@@ -343,3 +343,33 @@ def test_poll_interval_maps_rates(app):
     assert app._np_poll_interval() == 10
     app.np_poll_var.set("bogus")  # unknown -> fallback 3
     assert app._np_poll_interval() == 3
+
+
+def test_writer_reads_lcd_fresh_after_reconnect(app):
+    """Regression: the USB writer cached the LCD object once. After a
+    disconnect/reconnect the cached reference pointed at the CLOSED old
+    device, so send_frame threw and (silently swallowed) frames vanished
+    — artwork stopped with no log and no error."""
+    import queue as _queue
+    import threading as _threading
+    lcd_a = FakeLCD()
+    lcd_b = FakeLCD()
+    saved_lcd = app.lcd
+    app.lcd = lcd_a
+    app._np_frame_q = _queue.Queue(maxsize=1)
+    app._np_writer_stop = _threading.Event()
+    app._np_writer = None
+
+    app._np_send_ensure_writer()
+    # Simulate a reconnect: the app's lcd is now a NEW device object
+    app.lcd = lcd_b
+    # Push a frame and give the writer a moment to drain it
+    app._np_send(b"FRAME")
+    import time as _time
+    _time.sleep(0.3)
+    assert lcd_b.sent, "frame was not sent to the NEW LCD after reconnect"
+    assert not lcd_a.sent, "frame went to the stale (closed) LCD"
+
+    app._np_writer_stop.set()
+    app._np_writer = None
+    app.lcd = saved_lcd  # restore
