@@ -112,6 +112,20 @@ stays smooth via a 500 ms local render tick that interpolates position from
 the last poll; metadata is re-fetched every 3 s. This keeps the GUI at
 ~1-3% CPU even when Apple Music is busy decoding lossless audio.
 
+**Reliability by construction** (the stream survives hostile inputs):
+
+- **USB writes never block the UI** — frames go to a single background
+  writer thread with latest-frame semantics; a slow device can't stall the
+  mainloop.
+- **One fetch at a time** — session fetches and art fetches are guarded
+  (in-flight flags set *before* the thread spawns, reset in `finally`), so
+  a hung winsdk COM call can't wedge art loading or pile up threads.
+- **Graceful degradation** — a corrupt base JPEG or a 0-duration track
+  (live streams, YouTube) draws an empty bar instead of crashing the loop.
+- **Self-diagnostics** — runtime exceptions in hot paths are logged once
+  per type with full tracebacks, and a thread-count health check warns if
+  the process starts leaking threads. Silent failures don't stay silent.
+
 > **`winsdk` is required for the Now Playing feature** — see [INSTALL.md](INSTALL.md).
 
 ## Performance: ~190× lighter than TRCC

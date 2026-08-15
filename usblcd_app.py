@@ -1056,12 +1056,22 @@ class LCDApp(tk.Tk):
                     self._np_fetch_inflight = True
 
                     def fetch_art():
+                        art = None
                         try:
                             art = _get_thumbnail_pil(info)
                         except Exception:
                             art = None
-                        self._np_fetch_inflight = False
-                        self.after(0, lambda a=art: self._np_art_ready(key, a))
+                        finally:
+                            # ALWAYS reset the flag — a hung winsdk fetch
+                            # must not block art loading for every future
+                            # track (that froze the artwork on the old
+                            # song). Reset before marshaling so the next
+                            # poll can start even if after() fails.
+                            self._np_fetch_inflight = False
+                        # Deliver via the thread-safe result slot; the
+                        # render tick drains it (after() from a worker
+                        # thread is not reliable under tkinter).
+                        self._np_art_result = (key, art)
 
                     threading.Thread(target=fetch_art, daemon=True).start()
 
@@ -1201,6 +1211,15 @@ class LCDApp(tk.Tk):
         # Drain a completed background session fetch, if any
         if getattr(self, "_np_session_result", None) is not None:
             self._np_session_ready()
+        # Drain a completed art fetch, if any (thread-safe slot)
+        ar = getattr(self, "_np_art_result", None)
+        if ar is not None:
+            self._np_art_result = None
+            akey, aart = ar
+            try:
+                self._np_art_ready(akey, aart)
+            except Exception:
+                _log_exc("art_ready")
         meta = getattr(self, "_np_meta", None)
         if meta is None or self.lcd is None or self._np_last_art is None:
             # Nothing to render yet; keep ticking
