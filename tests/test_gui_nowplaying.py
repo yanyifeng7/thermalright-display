@@ -330,6 +330,18 @@ def test_corrupt_base_does_not_spin(app):
             app._np_render_job = None
 
 
+def test_render_interval_maps_rates(app):
+    """Render tick interval must reflect the user-selected Hz."""
+    app.np_render_var.set("1 Hz")
+    assert app._np_render_interval_ms() == 1000
+    app.np_render_var.set("2 Hz")
+    assert app._np_render_interval_ms() == 500
+    app.np_render_var.set("4 Hz")
+    assert app._np_render_interval_ms() == 250
+    app.np_render_var.set("bogus")
+    assert app._np_render_interval_ms() == 500  # default 2 Hz
+
+
 def test_poll_interval_maps_rates(app):
     """The user-selectable poll rate must map labels to seconds and fall
     back to 3s for unknown values."""

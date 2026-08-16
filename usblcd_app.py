@@ -74,6 +74,12 @@ OVERLAY_FONT_SCALE = {"Normal": 1.0, "Large": 1.35, "X-Large": 1.75}
 # regardless (it interpolates between polls via the render tick).
 POLL_RATES = ["2s", "3s", "5s", "10s"]
 POLL_RATE_SECONDS = {"2s": 2, "3s": 3, "5s": 5, "10s": 10}
+# Now-playing render tick rate (display labels -> Hz). Lower = fewer JPEG
+# encodes per song (less CPU), but the bar updates less often. The keepalive
+# keeps the AIO refreshed every 100ms regardless, so lowering the render
+# rate doesn't affect AIO freshness - just the smoothness of the bar.
+RENDER_RATES = ["1 Hz", "2 Hz", "4 Hz"]
+RENDER_RATE_HZ = {"1 Hz": 1, "2 Hz": 2, "4 Hz": 4}
 
 
 class PlayerThread(threading.Thread):
@@ -423,6 +429,19 @@ class LCDApp(tk.Tk):
                      style="Dark.TCombobox").grid(
             row=row, column=3, sticky="w", pady=5)
 
+        row += 1
+        ttk.Label(settings, text="Render rate:", style="Dark.TLabel").grid(
+            row=row, column=0, sticky="w", padx=10, pady=5)
+        # How often the bar gets re-encoded. Lower = fewer JPEG encodes
+        # (less CPU) but the bar updates less often. Keepalive re-sends the
+        # cached frame at 100ms regardless, so the AIO stays fresh - this
+        # only affects how smooth the bar motion looks.
+        self.np_render_var = tk.StringVar(value=RENDER_RATES[1])  # 2 Hz
+        ttk.Combobox(settings, textvariable=self.np_render_var,
+                     values=RENDER_RATES, state="readonly", width=8,
+                     style="Dark.TCombobox").grid(
+            row=row, column=1, sticky="w", pady=5)
+
         # Live preview: refresh when display-affecting settings change
         for var in (self.res_var, self.rot_var, self.scale_var):
             var.trace_add("write", lambda *a: self._refresh_preview())
@@ -435,7 +454,7 @@ class LCDApp(tk.Tk):
                     self.scale_var, self.bright_var, self.loop_var,
                     self.monitor_var, self.overlay_pos_var,
                     self.overlay_font_var, self.np_auto_var,
-                    self.lhm_auto_var, self.np_poll_var):
+                    self.lhm_auto_var, self.np_poll_var, self.np_render_var):
             var.trace_add("write", self._schedule_config_save)
         # Stop the MonitorThread when the overlay is toggled off - the
         # thread keeps polling LHM every 0.5s and rebuilding the sprite
@@ -1009,6 +1028,18 @@ class LCDApp(tk.Tk):
         label = self.np_poll_var.get() if hasattr(self, "np_poll_var") else "3s"
         return POLL_RATE_SECONDS.get(label, 3)
 
+    def _np_render_interval_ms(self) -> int:
+        """Milliseconds between now-playing render ticks (user-selectable).
+
+        The keepalive re-sends the cached frame every 100ms regardless, so
+        lowering this only affects how often the JPEG gets re-encoded (less
+        CPU). The progress bar's interpolated position is updated per tick;
+        on a 633px-wide bar at 1Hz it jumps ~2.6px per frame (smooth).
+        """
+        label = self.np_render_var.get() if hasattr(self, "np_render_var") else "2 Hz"
+        hz = RENDER_RATE_HZ.get(label, 2)
+        return int(1000 / hz)
+
     # ---------- NPSMSvc watchdog ----------
     # Windows' Now Playing Session Manager Service (NPSMSvc_*) has a known
     # runaway: when a media session is active it can spin at ~100%+ of a
@@ -1147,7 +1178,7 @@ class LCDApp(tk.Tk):
         # Ensure the render tick is running (it drains the fetch result
         # and keeps the progress bar smooth between metadata polls)
         if getattr(self, "_np_render_job", None) is None:
-            self._np_render_job = self.after(500, self._np_render_tick)
+            self._np_render_job = self.after(self._np_render_interval_ms(), self._np_render_tick)
 
     def _np_session_ready(self):
         """Called on the UI thread (from the render tick) when a background
@@ -1376,7 +1407,7 @@ class LCDApp(tk.Tk):
         meta = getattr(self, "_np_meta", None)
         if meta is None or self.lcd is None or self._np_last_art is None:
             # Nothing to render yet; keep ticking
-            self._np_render_job = self.after(500, self._np_render_tick)
+            self._np_render_job = self.after(self._np_render_interval_ms(), self._np_render_tick)
             return
         try:
             title, artist, _key = meta
@@ -1396,7 +1427,7 @@ class LCDApp(tk.Tk):
                 base_jpeg = self._np_base_jpeg
                 if not base_jpeg.startswith(b"\xff\xd8"):
                     self._np_base_jpeg = None  # rebuild on next poll
-                    self._np_render_job = self.after(500, self._np_render_tick)
+                    self._np_render_job = self.after(self._np_render_interval_ms(), self._np_render_tick)
                     return
                 w, h = 1600, 720
                 rot_s = str(self.rot_var.get()).replace("°", "").strip()
@@ -1420,7 +1451,7 @@ class LCDApp(tk.Tk):
         # Always reschedule (the tick is the smooth-bar heartbeat; an
         # exception must not kill it — the corrupt-base guard handles
         # the persistent-failure case, logging makes it visible).
-        self._np_render_job = self.after(500, self._np_render_tick)
+        self._np_render_job = self.after(self._np_render_interval_ms(), self._np_render_tick)
 
     def _np_send_ensure_writer(self):
         """Start the background USB writer thread if not running.
@@ -2111,6 +2142,7 @@ class LCDApp(tk.Tk):
                 "auto_art": self.np_auto_var.get(),
                 "auto_lhm": self.lhm_auto_var.get(),
                 "poll_rate": self.np_poll_var.get(),
+                "render_rate": self.np_render_var.get(),
                 "overlay_pos": self.overlay_pos_var.get(),
                 "overlay_font": self.overlay_font_var.get(),
             },
@@ -2141,6 +2173,7 @@ class LCDApp(tk.Tk):
         self.np_auto_var.set(s.get("auto_art", self.np_auto_var.get()))
         self.lhm_auto_var.set(s.get("auto_lhm", self.lhm_auto_var.get()))
         self.np_poll_var.set(s.get("poll_rate", self.np_poll_var.get()))
+        self.np_render_var.set(s.get("render_rate", self.np_render_var.get()))
         self.overlay_pos_var.set(s.get("overlay_pos", self.overlay_pos_var.get()))
         self.overlay_font_var.set(
             s.get("overlay_font", self.overlay_font_var.get())
