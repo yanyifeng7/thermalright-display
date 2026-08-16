@@ -34,6 +34,7 @@ WSDK_AVAILABLE = False
 try:
     from winsdk.windows.media.control import (
         GlobalSystemMediaTransportControlsSessionManager as SMTCManager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
     )
     WSDK_AVAILABLE = True
 except ImportError:
@@ -51,16 +52,26 @@ def _sync(op, timeout: float = 5.0):
 
 
 def _get_active_session():
-    """Return the first GSMTC session that has media info (Apple Music etc.)."""
+    """Return the GSMTC session that is actively playing media.
+
+    Picks the FIRST playing session; if none are playing, falls back to
+    the most recently updated non-empty session (handles a brief gap
+    between tracks). Skips paused/stopped sessions — otherwise a paused
+    QQ Music (or any background app) wins the tiebreak over an actively
+    playing Apple Music, and the AIO shows the wrong artwork.
+    """
     if not WSDK_AVAILABLE:
         return None, None, None
     try:
         mgr = _sync(SMTCManager.request_async())
+        # First pass: find a session that's actually playing
         for session in mgr.get_sessions():
             try:
+                pb = session.get_playback_info()
+                if pb.playback_status != Status.PLAYING:
+                    continue
                 info = _sync(session.try_get_media_properties_async(), timeout=2.0)
                 if info and (info.title or info.artist):
-                    # Read timeline (position / duration) for the progress bar
                     tl = session.get_timeline_properties()
                     try:
                         duration_sec = (tl.end_time - tl.start_time).total_seconds()
@@ -71,6 +82,26 @@ def _get_active_session():
                             position_sec, duration_sec)
             except Exception:
                 continue
+        # Second pass: nothing playing — fall back to most recently
+        # updated session (handles the gap between tracks cleanly).
+        best = None
+        best_time = 0
+        for session in mgr.get_sessions():
+            try:
+                info = _sync(session.try_get_media_properties_async(), timeout=2.0)
+                if not (info and (info.title or info.artist)):
+                    continue
+                tl = session.get_timeline_properties()
+                lu = int(tl.last_updated_time.timestamp() * 10000000) if tl.last_updated_time else 0
+                if lu >= best_time:
+                    best_time = lu
+                    best = (session, info, session.source_app_user_model_id,
+                            max(0, (tl.position - tl.start_time).total_seconds()),
+                            max(0, (tl.end_time - tl.start_time).total_seconds()))
+            except Exception:
+                continue
+        if best is not None:
+            return best
     except Exception:
         pass
     return None, None, None, 0, 0

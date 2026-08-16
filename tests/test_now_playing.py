@@ -181,3 +181,67 @@ def test_draw_progress_bar_zero_duration():
     for x in range(bx, bx + bw):
         p = img.getpixel((x, by + bh // 2))
         assert not (abs(p[0] - 200) < 10 and abs(p[1] - 205) < 10), x
+
+
+def test_session_selection_prefers_playing_over_paused(monkeypatch):
+    """Regression: when two music apps are open, a paused QQ Music used to
+    win over a playing Apple Music (whichever iterated first in GSMTC).
+    The AIO showed the paused app's artwork. Fix: only return sessions
+    where playback_status == Playing; if nothing is playing, fall back
+    to the most-recently-updated session."""
+    import datetime
+    from winsdk.windows.media.control import (
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+    )
+    import now_playing as np_mod
+
+    EPOCH = datetime.datetime(1601, 1, 1)
+
+    class _PB:
+        def __init__(self, s): self.playback_status = s
+    class _TL:
+        def __init__(self, pos, dur, lu):
+            self.start_time = EPOCH
+            self.position = EPOCH + datetime.timedelta(seconds=pos)
+            self.end_time = EPOCH + datetime.timedelta(seconds=dur)
+            self.last_updated_time = lu
+    class _Info:
+        def __init__(self, t, a):
+            self.title = t; self.artist = a
+            class X: pass
+            self.thumbnail = X()
+    class _Op:
+        def __init__(self, i): self._i = i
+        def get(self): return self._i
+    class _Sess:
+        def __init__(self, app, t, a, status, pos, dur, lu):
+            self.source_app_user_model_id = app
+            self._i = _Info(t, a); self._status = status; self._tl = _TL(pos, dur, lu)
+        def try_get_media_properties_async(self): return _Op(self._i)
+        def get_playback_info(self): return _PB(self._status)
+        def get_timeline_properties(self): return self._tl
+    class _Mgr:
+        def __init__(self, ss): self._ss = ss
+        def get_sessions(self): return self._ss
+    class _Req:
+        def __init__(self, m): self._m = m
+        def get(self): return self._m
+
+    now = datetime.datetime(2026, 8, 16, 12, 0)
+    # QQ paused (older), Apple playing (newer)
+    qq = _Sess("QQ!App", "QQ song", "QQ artist", Status.PAUSED, 50, 200, now)
+    apple = _Sess("Apple!App", "Apple song", "Apple artist", Status.PLAYING, 100, 300, now)
+
+    monkeypatch.setattr(np_mod, "_sync", lambda op, timeout=None: op.get())
+    monkeypatch.setattr(np_mod.SMTCManager, "request_async", lambda: _Req(_Mgr([qq, apple])))
+
+    _, info, app_id, _, _ = np_mod._get_active_session()
+    assert info.title == "Apple song", f"playing app not preferred: got {info.title!r}"
+    assert app_id == "Apple!App"
+
+    # Now both paused -> most recently updated wins
+    apple_p = _Sess("Apple!App", "Apple paused", "Apple artist", Status.PAUSED, 0, 200, now)
+    qq_p = _Sess("QQ!App", "QQ paused", "QQ artist", Status.PAUSED, 0, 200, now - datetime.timedelta(hours=2))
+    monkeypatch.setattr(np_mod.SMTCManager, "request_async", lambda: _Req(_Mgr([qq_p, apple_p])))
+    _, info, _, _, _ = np_mod._get_active_session()
+    assert info.title == "Apple paused", f"recent-paused not preferred: got {info.title!r}"
