@@ -8,12 +8,24 @@ from __future__ import annotations
 
 import io
 import os
-import logging
 import sys
+import logging
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, ttk
+
+# Prepend this script's venv to sys.path so we always use OUR Pillow,
+# winsdk, pyusb, psutil, etc. and not a foreign venv's (e.g. Hermes's
+# agent venv that gets injected via PYTHONPATH). Insert at index 0 so
+# it wins over the polluted entries (the script's '' cwd is also
+# re-inserted at 1 to preserve the original behavior).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_VENV_SITE = os.path.join(_HERE, ".venv", "Lib", "site-packages")
+if os.path.isdir(_VENV_SITE):
+    if _VENV_SITE in sys.path:
+        sys.path.remove(_VENV_SITE)
+    sys.path.insert(0, _VENV_SITE)
 
 from PIL import Image, ImageSequence, ImageTk
 
