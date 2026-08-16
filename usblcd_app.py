@@ -1049,10 +1049,17 @@ class LCDApp(tk.Tk):
                     continue
                 # Measure its CPU over a 3s window (cpu_percent is since
                 # last call; call it once after the wait for the delta).
-                p = _psutil.Process(pid)
-                p.cpu_percent(interval=None)  # prime the sample
-                stop.wait(3)
-                avg = p.cpu_percent(interval=None)
+                # NoSuchProcess is expected right after a kill+respawn -
+                # the stale psutil object still points at the old PID.
+                # Suppress the noisy traceback; just retry next loop.
+                try:
+                    p = _psutil.Process(pid)
+                    p.cpu_percent(interval=None)  # prime the sample
+                    stop.wait(3)
+                    avg = p.cpu_percent(interval=None)
+                except _psutil.NoSuchProcess:
+                    stop.wait(15)
+                    continue
                 # cpu_percent returns % of ONE core; ~1 core = 100%
                 if avg > 40:
                     high_strikes += 1
@@ -1071,7 +1078,13 @@ class LCDApp(tk.Tk):
                 # Handle leak: npsm.dll leaks COM/session handles (~0.4/s
                 # baseline; the runaway is a spin loop on leaked state).
                 # A big handle count with rising CPU = early spin signal.
-                h = p.num_handles()
+                # NoSuchProcess is expected right after a kill - the
+                # stale psutil handle points at the old PID; skip silently.
+                try:
+                    h = p.num_handles()
+                except _psutil.NoSuchProcess:
+                    stop.wait(15)
+                    continue
                 if h > 1500:
                     handle_strikes += 1
                     if handle_strikes >= 2:
