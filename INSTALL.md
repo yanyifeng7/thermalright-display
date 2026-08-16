@@ -83,6 +83,14 @@ between polls.
    checked (default in Display settings), the AIO shows the album art
    automatically — no Play button needed.
 
+**Known Windows quirk:** the underlying
+[Now Playing Session Manager Service](https://learn.microsoft.com/en-us/answers/questions/4067371/service-host-npsmsvc-1f1c1b99-using-99-cpu-usage)
+(`NPSMSvc_*`) has a known COM/handle leak in `npsm.dll` that can spin the
+service at ~100 % CPU indefinitely while a media session is active. The
+GUI includes a background watchdog that restarts the service when it
+sustains >40 % CPU or accumulates >1500 handles (every ~15 s). On Windows
+the service respawns on demand, so the restart is safe and transparent.
+
 **Details:**
 - Works with *any* app that appears in the Windows volume-flyout media card.
 - The AIO stream includes a progress bar with mm:ss times (updated every

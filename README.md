@@ -116,7 +116,8 @@ the last poll; metadata is re-fetched every 3 s. This keeps the GUI at
 
 - **USB writes never block the UI** — frames go to a single background
   writer thread with latest-frame semantics; a slow device can't stall the
-  mainloop.
+  mainloop. The writer reads the LCD object fresh every loop, so
+  disconnect/reconnect always reaches the new device.
 - **One fetch at a time** — session fetches and art fetches are guarded
   (in-flight flags set *before* the thread spawns, reset in `finally`), so
   a hung winsdk COM call can't wedge art loading or pile up threads.
@@ -125,6 +126,18 @@ the last poll; metadata is re-fetched every 3 s. This keeps the GUI at
 - **Self-diagnostics** — runtime exceptions in hot paths are logged once
   per type with full tracebacks, and a thread-count health check warns if
   the process starts leaking threads. Silent failures don't stay silent.
+
+**NPSMSvc watchdog** — Windows' [Now Playing Session Manager Service](https://learn.microsoft.com/en-us/answers/questions/4067371/service-host-npsmsvc-1f1c1b99-using-99-cpu-usage)
+(`NPSMSvc_*`) hosts the GSMTC API but has a known COM/handle leak in
+`npsm.dll` (~0.4 handles/sec baseline, no upstream fix as of 2026-08).
+When a media session is active, the service can spin at ~100% of a
+core indefinitely (observed: 98% avg over 2.4 days, CPU temp creep
+39 → 48 °C). Disabling NPSMSvc is not an option — GSMTC wraps it, and
+our Now Playing feature breaks if the service is dead (verified
+empirically). The watchdog restarts the service automatically when it
+sustains >40 % CPU for 3 checks or >1500 handles for 2 checks. Windows
+respawns the service on demand, so the kill is safe and non-elevated.
+See [`usblcd_app.py:_watchdog_loop`](usblcd_app.py) for the implementation.
 
 > **`winsdk` is required for the Now Playing feature** — see [INSTALL.md](INSTALL.md).
 
