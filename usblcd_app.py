@@ -437,6 +437,11 @@ class LCDApp(tk.Tk):
                     self.overlay_font_var, self.np_auto_var,
                     self.lhm_auto_var, self.np_poll_var):
             var.trace_add("write", self._schedule_config_save)
+        # Stop the MonitorThread when the overlay is toggled off - the
+        # thread keeps polling LHM every 0.5s and rebuilding the sprite
+        # on sensor changes even when the overlay isn't shown (measured
+        # as mini CPU-temp spikes 38->42C every couple of seconds).
+        self.monitor_var.trace_add("write", self._on_monitor_var_changed)
 
         # Tabbed content: [Playlist] [Now Playing]
         nb = ttk.Notebook(self, style="Dark.TNotebook")
@@ -836,6 +841,32 @@ class LCDApp(tk.Tk):
         # Now-playing artwork: invalidate the base so the next poll re-bakes
         # the new brightness (the poller rebuilds it on track-change logic)
         self._np_base_jpeg = None
+
+    def _on_monitor_var_changed(self, *args):
+        """Stop the MonitorThread when overlay is toggled OFF.
+
+        Without this, toggling overlay off doesn't stop the background
+        thread that's polling LHM every 0.5s + rebuilding the sprite on
+        sensor changes - measured as ~3-4 C temp spikes every couple
+        seconds (the GIF-preview path always started MonitorThread when
+        overlay was on at play time).
+        """
+        if self.monitor_var.get():
+            # Overlay just turned ON: start MonitorThread if a playlist is
+            # currently playing and the thread isn't running yet.
+            if self.monitor is None and self.player is not None:
+                width, height, _, _, _, _, _ = self._parse_settings()
+                self.monitor = MonitorThread(
+                    self, self.frames, self.delays_ms, width, height,
+                    on_status=self._set_status,
+                )
+                self.monitor.start()
+        else:
+            # Overlay just turned OFF: stop the MonitorThread entirely.
+            if self.monitor is not None:
+                self.monitor.stop()
+                self.monitor.join(timeout=2)
+                self.monitor = None
 
     def _playlist_start_item(self, idx: int):
         """Load + play one playlist item (single cycle, then advance)."""
